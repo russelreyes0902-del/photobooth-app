@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { playCountdownBeep, playShutterSound } from '../utils/audio';
+import { LiveSessionRecorder } from '../utils/liveSessionRecorder';
 
 export function isMobileOrTabletDevice() {
   if (typeof window === 'undefined' || typeof navigator === 'undefined') return false;
@@ -37,6 +38,13 @@ export function useCamera() {
 
   const isMobileOrTablet = isMobileOrTabletDevice();
 
+  // Single source of truth for lens optical crop scale:
+  // On iPad / tablet front camera:
+  // - 1x mode: 1.38x portrait crop (matches native Camera app 1x mode)
+  // - 0.5x mode: 1.0x uncropped full 122° wide-angle
+  // On laptop / desktop single-lens webcams: strictly 1.0x
+  const lensZoomScale = (isMobileOrTablet && lensMode === '1x') ? 1.38 : 1.0;
+
   // Enumerate video devices and detect actual hardware ultra-wide camera
   const refreshDevices = useCallback(async () => {
     try {
@@ -73,7 +81,6 @@ export function useCamera() {
         setUltraWideDeviceId(frontCameras[1].deviceId);
       } else if (isMobileOrTablet) {
         // Modern iPads have a single 12MP ultra-wide front sensor (122° FOV)
-        // WebKit streams the raw 0.5x ultra-wide view, which can be cropped to 1x
         setHasHardwareUltraWide(true);
         setUltraWideDeviceId(null);
       } else {
@@ -99,7 +106,6 @@ export function useCamera() {
       if (capabilities.zoom) {
         const minZ = capabilities.zoom.min || 1.0;
         const maxZ = capabilities.zoom.max || 3.0;
-        // 0.5x = full wide (min zoom); 1x = standard crop (e.g. 1.4x)
         const targetZoom = mode === '0.5x' ? minZ : Math.min(maxZ, 1.4);
         await track.applyConstraints({
           advanced: [{ zoom: targetZoom }],
@@ -144,7 +150,6 @@ export function useCamera() {
 
     let newStream = null;
 
-    // Attempt 1: Try specific requested deviceId or facingMode
     try {
       let targetDeviceId = selectedDeviceId;
       if (lensMode === '0.5x' && ultraWideDeviceId) {
@@ -166,7 +171,6 @@ export function useCamera() {
     } catch (err1) {
       console.warn('Attempt 1 with optimal constraints failed, trying fallback...', err1);
 
-      // Attempt 2: Fall back to basic facingMode without resolution constraints
       try {
         newStream = await navigator.mediaDevices.getUserMedia({
           audio: false,
@@ -175,7 +179,6 @@ export function useCamera() {
       } catch (err2) {
         console.warn('Attempt 2 with facingMode failed, trying generic video...', err2);
 
-        // Attempt 3: Fall back to any available video stream
         try {
           newStream = await navigator.mediaDevices.getUserMedia({
             audio: false,
@@ -261,16 +264,13 @@ export function useCamera() {
       const nextLens = lensMode === '1x' ? '0.5x' : '1x';
       setLensMode(nextLens);
 
-      // If hardware deviceId switching is available
-      if (ultraWideDeviceId) {
-        // Trigger camera restart with new deviceId
-      } else if (streamRef.current) {
+      if (streamRef.current) {
         applyNativeZoomIfSupported(streamRef.current, nextLens);
       }
     } catch (err) {
       console.warn('Error toggling lens mode:', err);
     }
-  }, [hasHardwareUltraWide, lensMode, ultraWideDeviceId, applyNativeZoomIfSupported]);
+  }, [hasHardwareUltraWide, lensMode, applyNativeZoomIfSupported]);
 
   // Toggle mirror manually
   const toggleMirror = useCallback(() => {
@@ -281,7 +281,7 @@ export function useCamera() {
     }
   }, []);
 
-  // Single frame grab from video element with full safety guards and accurate lens crop
+  // Single frame grab from video element with 100% viewfinder-matched crop
   const grabFrame = useCallback(() => {
     try {
       const video = videoRef.current;
@@ -303,15 +303,12 @@ export function useCamera() {
         ctx.scale(-1, 1);
       }
 
-      // On iPad/iPhone:
-      // The physical front camera is a 122° ultra-wide sensor (0.5x).
-      // In 1x mode, standard portrait crop (1.38x) is applied to match the viewfinder.
-      // In 0.5x mode, the full uncropped wide frame is captured.
-      const shouldCrop1x = isMobileOrTablet && lensMode === '1x' && !ultraWideDeviceId;
-      if (shouldCrop1x) {
-        const cropScale = 1.38;
-        const sw = vw / cropScale;
-        const sh = vh / cropScale;
+      // Exact crop matching what the user sees in the viewfinder:
+      // When lensZoomScale > 1.0 (1x mode on iPad/tablet), crop by lensZoomScale
+      // When 0.5x mode, capture the full uncropped frame!
+      if (lensZoomScale > 1.0) {
+        const sw = vw / lensZoomScale;
+        const sh = vh / lensZoomScale;
         const sx = (vw - sw) / 2;
         const sy = (vh - sh) / 2;
         ctx.drawImage(video, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
@@ -327,15 +324,30 @@ export function useCamera() {
       console.error('Safe grabFrame caught error:', err);
       return null;
     }
-  }, [isMirrored, isMobileOrTablet, lensMode, ultraWideDeviceId]);
+  }, [isMirrored, lensZoomScale]);
 
-  // Burst capture sequence with robust error isolation & cleanup
-  const startBurstCapture = useCallback(async (onPhotoCaptured, onComplete) => {
+  // Burst capture sequence with LIVE video recording during the entire shoot
+  const startBurstCapture = useCallback(async (onPhotoCaptured, onComplete, activeFilterObj = null) => {
     if (isCapturingBurst) return;
+
+    let liveRecorder = null;
 
     try {
       setIsCapturingBurst(true);
       setBurstProgress(0);
+
+      // Initialize live session video recorder
+      if (videoRef.current) {
+        liveRecorder = new LiveSessionRecorder({
+          videoEl: videoRef.current,
+          isMirrored,
+          lensZoomScale,
+          activeFilter: activeFilterObj,
+          width: 720,
+          height: 960,
+        });
+        liveRecorder.start();
+      }
 
       const capturedPhotos = [];
       const totalShots = 4;
@@ -343,10 +355,25 @@ export function useCamera() {
       for (let shot = 0; shot < totalShots; shot++) {
         setBurstProgress(shot);
 
+        // Update recorder with current shot
+        if (liveRecorder) {
+          liveRecorder.updateState({
+            shot: shot + 1,
+            countdown: countdownDelay,
+            isFlashing: false,
+            lensZoomScale,
+            isMirrored,
+            activeFilter: activeFilterObj,
+          });
+        }
+
         // Countdown delay loop
         const delay = Math.max(1, countdownDelay || 3);
         for (let c = delay; c > 0; c--) {
           setCountdown(c);
+          if (liveRecorder) {
+            liveRecorder.updateState({ countdown: c, isFlashing: false });
+          }
           try {
             playCountdownBeep(false);
           } catch (e) {}
@@ -355,6 +382,9 @@ export function useCamera() {
 
         // Final smile cue
         setCountdown('Smile!');
+        if (liveRecorder) {
+          liveRecorder.updateState({ countdown: 'Smile!', isFlashing: false });
+        }
         try {
           playCountdownBeep(true);
         } catch (e) {}
@@ -362,6 +392,9 @@ export function useCamera() {
 
         // Screen flash & shutter sound
         setIsFlashing(true);
+        if (liveRecorder) {
+          liveRecorder.updateState({ isFlashing: true, countdown: null });
+        }
         try {
           playShutterSound();
         } catch (e) {}
@@ -379,7 +412,14 @@ export function useCamera() {
           }
         }
 
-        setTimeout(() => setIsFlashing(false), 250);
+        // Flash decay
+        setTimeout(() => {
+          setIsFlashing(false);
+          if (liveRecorder) {
+            liveRecorder.updateState({ isFlashing: false });
+          }
+        }, 250);
+
         setCountdown(null);
 
         // Inter-shot breather
@@ -388,22 +428,34 @@ export function useCamera() {
         }
       }
 
+      // Brief 500ms tail to show the completed final shot in the recording
+      await new Promise(r => setTimeout(r, 500));
+
+      // Stop live video recorder and retrieve the video file
+      let recordedVideo = null;
+      if (liveRecorder) {
+        recordedVideo = await liveRecorder.stop();
+      }
+
       setBurstProgress(totalShots);
       if (onComplete) {
         try {
-          onComplete(capturedPhotos);
+          onComplete(capturedPhotos, recordedVideo);
         } catch (compErr) {
           console.warn('onComplete callback warning:', compErr);
         }
       }
     } catch (burstErr) {
       console.error('Error during burst capture sequence:', burstErr);
+      if (liveRecorder) {
+        try { await liveRecorder.stop(); } catch (e) {}
+      }
     } finally {
       setIsCapturingBurst(false);
       setCountdown(null);
       setIsFlashing(false);
     }
-  }, [isCapturingBurst, countdownDelay, grabFrame]);
+  }, [isCapturingBurst, countdownDelay, grabFrame, isMirrored, lensZoomScale]);
 
   return {
     videoRef,
@@ -420,6 +472,7 @@ export function useCamera() {
     toggleLensMode,
     hasHardwareUltraWide,
     isMobileOrTablet,
+    lensZoomScale,
     isLoading,
     hasPermission,
     permissionError,

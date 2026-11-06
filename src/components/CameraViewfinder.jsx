@@ -55,25 +55,21 @@ export default function CameraViewfinder({
   }, [camera.isCapturingBurst, camera.hasPermission, onStartBurst]);
 
   // Optical Framing Transform:
-  // On iPads / mobile tablets:
-  // The physical hardware sensor is 122° Ultra-Wide by default (0.5x).
-  // In 1x mode: we apply standard portrait framing (scale 1.38x).
-  // In 0.5x mode: we show the full uncropped ultra-wide room view (scale 1.0x).
-  // On Laptops / Desktops: scale is fixed at natural 1.0x.
+  // Strictly matched to camera.lensZoomScale (1.38 on 1x mode, 1.0 on 0.5x mode)
   const getTransformStyle = useCallback(() => {
     try {
       const transforms = [];
       if (camera.isMirrored) {
         transforms.push('scaleX(-1)');
       }
-      if (camera.isMobileOrTablet && camera.lensMode === '1x') {
-        transforms.push('scale(1.38)');
+      if (camera.lensZoomScale && camera.lensZoomScale > 1.0) {
+        transforms.push(`scale(${camera.lensZoomScale})`);
       }
       return transforms.length > 0 ? transforms.join(' ') : 'none';
     } catch (e) {
       return 'none';
     }
-  }, [camera.isMirrored, camera.isMobileOrTablet, camera.lensMode]);
+  }, [camera.isMirrored, camera.lensZoomScale]);
 
   // Switch protocol to HTTPS
   const handleSwitchToHttps = () => {

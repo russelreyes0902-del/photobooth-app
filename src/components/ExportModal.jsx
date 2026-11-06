@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import confetti from 'canvas-confetti';
 import { renderPhotoStrip } from '../utils/canvasCompositor';
 import { createAnimatedGif } from '../utils/gifGenerator';
-import { createExportVideo, getSupportedVideoMimeType } from '../utils/videoGenerator';
+import { createExportVideo } from '../utils/videoGenerator';
 import { FILTERS } from '../utils/filters';
 import { playCelebrationSound } from '../utils/audio';
 import { 
@@ -24,6 +24,7 @@ export default function ExportModal({
   onClose,
   template,
   photos = [],
+  sessionVideo = null,
   filterId: initialFilterId,
   paperColor,
   onUpdateFilter,
@@ -37,7 +38,7 @@ export default function ExportModal({
   const [gifProgress, setGifProgress] = useState(0);
   const [gifUrl, setGifUrl] = useState(null);
 
-  // Video state
+  // Video state (defaults to live session video if recorded)
   const [isGeneratingVideo, setIsGeneratingVideo] = useState(false);
   const [videoProgress, setVideoProgress] = useState(0);
   const [videoUrl, setVideoUrl] = useState(null);
@@ -54,6 +55,15 @@ export default function ExportModal({
   useEffect(() => {
     setFilterId(initialFilterId);
   }, [initialFilterId]);
+
+  // Sync live session video if provided by camera
+  useEffect(() => {
+    if (sessionVideo && sessionVideo.url) {
+      setVideoUrl(sessionVideo.url);
+      setVideoBlob(sessionVideo.blob);
+      setVideoExt(sessionVideo.ext || 'mp4');
+    }
+  }, [sessionVideo]);
 
   // Confetti celebration when modal opens
   useEffect(() => {
@@ -106,9 +116,9 @@ export default function ExportModal({
           const res = await createAnimatedGif({
             photos,
             filterId,
-            width: 600,
-            height: 450,
-            frameDelayMs: 450,
+            width: 540,
+            height: 405,
+            frameDelayMs: 500,
             onProgress: (p) => {
               if (!isCancelled) setGifProgress(p);
             },
@@ -132,7 +142,7 @@ export default function ExportModal({
     }
   }, [isOpen, activeTab, gifUrl, photos, filterId]);
 
-  // Generate Video when Video tab is opened
+  // Generate Video if not recorded during session
   useEffect(() => {
     if (isOpen && activeTab === 'video' && !videoUrl && photos.length > 0) {
       let isCancelled = false;
@@ -159,7 +169,7 @@ export default function ExportModal({
         } catch (err) {
           console.error('Failed to create video safely:', err);
           if (!isCancelled) {
-            setErrorMessage('Unable to encode video. Try downloading the animated GIF instead.');
+            setErrorMessage('Unable to encode video.');
           }
         } finally {
           if (!isCancelled) setIsGeneratingVideo(false);
@@ -172,7 +182,7 @@ export default function ExportModal({
     }
   }, [isOpen, activeTab, videoUrl, photos, filterId]);
 
-  // When filter changes, invalidate cached video and gif
+  // When filter changes, invalidate cached gif
   const handleFilterChange = (fId) => {
     try {
       setFilterId(fId);
@@ -180,11 +190,6 @@ export default function ExportModal({
       if (gifUrl) {
         URL.revokeObjectURL(gifUrl);
         setGifUrl(null);
-      }
-      if (videoUrl) {
-        URL.revokeObjectURL(videoUrl);
-        setVideoUrl(null);
-        setVideoBlob(null);
       }
     } catch (err) {
       console.warn('Filter change error:', err);
@@ -239,14 +244,14 @@ export default function ExportModal({
   const handleDownloadVideo = () => {
     try {
       if (!videoUrl) {
-        setErrorMessage('Video is still generating, please wait a moment.');
+        setErrorMessage('Video is still processing, please wait a moment.');
         return;
       }
       const link = document.createElement('a');
-      link.download = `retrobooth-video-${Date.now()}.${videoExt}`;
+      link.download = `retrobooth-live-video-${Date.now()}.${videoExt}`;
       link.href = videoUrl;
       link.click();
-      setStatusMessage(`Video (${videoExt.toUpperCase()}) downloaded successfully!`);
+      setStatusMessage(`Live Video (${videoExt.toUpperCase()}) downloaded successfully!`);
       setTimeout(() => setStatusMessage(null), 2500);
     } catch (err) {
       console.error('Download Video caught error:', err);
@@ -275,7 +280,7 @@ export default function ExportModal({
     }
   };
 
-  // Native Web Share API (supports sharing images or videos to iPhone/iPad camera roll!)
+  // Native Web Share API (supports sharing images or live videos to iPhone/iPad camera roll!)
   const handleShare = async () => {
     try {
       if (!navigator.share) {
@@ -285,14 +290,14 @@ export default function ExportModal({
       }
 
       if (activeTab === 'video' && videoBlob) {
-        // Share video file directly to camera roll / Instagram
+        // Share live video file directly to camera roll / Instagram
         const file = new File([videoBlob], `retrobooth-video-${Date.now()}.${videoExt}`, {
           type: videoBlob.type || 'video/mp4',
         });
         if (navigator.canShare && navigator.canShare({ files: [file] })) {
           await navigator.share({
-            title: 'My 4-Cut Photobooth Video',
-            text: 'Taken at RetroBooth Studio! 🎬✨',
+            title: 'My 4-Cut Photobooth Live Video',
+            text: 'Live photobooth countdown & photo session! 🎬✨',
             files: [file],
           });
           return;
@@ -385,7 +390,7 @@ export default function ExportModal({
         {/* ============================================================ */}
         <div className="relative flex-1 flex flex-col items-center justify-center p-4 bg-studio-950/70 border-b md:border-b-0 md:border-r border-white/5 min-h-0 overflow-hidden">
           
-          {/* Format Toggle Tabs: Strip vs Video vs GIF */}
+          {/* Format Toggle Tabs: Strip vs Live Video vs GIF */}
           <div className="flex items-center gap-1.5 p-1 bg-black/60 backdrop-blur-md rounded-2xl border border-white/10 mb-3 z-10">
             <button
               onClick={() => setActiveTab('strip')}
@@ -407,7 +412,7 @@ export default function ExportModal({
               }`}
             >
               <Video className="w-3.5 h-3.5 text-accent-cyan" />
-              <span>Video (MP4)</span>
+              <span>Live Video (MP4)</span>
             </button>
             <button
               onClick={() => setActiveTab('gif')}
@@ -437,7 +442,7 @@ export default function ExportModal({
                   <div className="flex flex-col items-center gap-3">
                     <div className="w-10 h-10 border-4 border-accent-cyan/30 border-t-accent-cyan rounded-full animate-spin" />
                     <p className="text-xs font-semibold text-slate-300">
-                      Encoding MP4 Video... {videoProgress}%
+                      Processing Live Video... {videoProgress}%
                     </p>
                   </div>
                 ) : videoUrl ? (
@@ -452,7 +457,7 @@ export default function ExportModal({
                     className="w-full h-full object-contain"
                   />
                 ) : (
-                  <p className="text-xs text-slate-400">Ready to encode video</p>
+                  <p className="text-xs text-slate-400">Ready to play video</p>
                 )}
               </div>
             ) : (
@@ -491,7 +496,9 @@ export default function ExportModal({
               </div>
               <h2 className="text-xl font-extrabold text-white">Save & Download</h2>
               <p className="text-xs text-slate-400 mt-0.5">
-                Export in full resolution image, animated MP4 video, or looping GIF.
+                {activeTab === 'video'
+                  ? 'Real live video recording from countdown to photos taken!'
+                  : 'Export in full resolution image or looping animated GIF.'}
               </p>
             </div>
 
@@ -593,7 +600,7 @@ export default function ExportModal({
                 }`}
               >
                 <Download className="w-4 h-4" />
-                <span>Download Video ({videoExt.toUpperCase()})</span>
+                <span>Download Live Video ({videoExt.toUpperCase()})</span>
               </button>
             ) : (
               <button

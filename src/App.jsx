@@ -6,6 +6,7 @@ import FilterControls from './components/FilterControls';
 import PhotoStripCanvas from './components/PhotoStripCanvas';
 import ExportModal from './components/ExportModal';
 import { BUILTIN_TEMPLATES, getTemplateById } from './utils/templates';
+import { getFilterById } from './utils/filters';
 import { 
   Sparkles, 
   Layers, 
@@ -22,8 +23,9 @@ export default function App() {
   const [activeFilterId, setActiveFilterId] = useState('normal');
   const [customTemplates, setCustomTemplates] = useState([]);
 
-  // Captured photos (up to 4)
+  // Captured photos (up to 4) & Live Recorded Session Video
   const [photos, setPhotos] = useState([]);
+  const [sessionVideo, setSessionVideo] = useState(null);
 
   // Modals & Mobile Drawers
   const [isExportOpen, setIsExportOpen] = useState(false);
@@ -46,11 +48,14 @@ export default function App() {
     }
   }, []);
 
-  // Handle complete burst finished
-  const handleBurstComplete = useCallback((capturedPhotos) => {
+  // Handle complete burst finished (with captured photos + live recorded video)
+  const handleBurstComplete = useCallback((capturedPhotos, recordedVideo) => {
     try {
       if (Array.isArray(capturedPhotos) && capturedPhotos.length > 0) {
         setPhotos(capturedPhotos);
+        if (recordedVideo) {
+          setSessionVideo(recordedVideo);
+        }
         // Automatically open export modal after burst completes
         setTimeout(() => {
           setIsExportOpen(true);
@@ -61,20 +66,23 @@ export default function App() {
     }
   }, []);
 
-  // Trigger burst capture
+  // Trigger burst capture with live session video recording
   const handleStartBurst = useCallback(() => {
     try {
       setPhotos([]);
-      camera.startBurstCapture(handlePhotoCaptured, handleBurstComplete);
+      setSessionVideo(null);
+      const activeFilterObj = getFilterById(activeFilterId);
+      camera.startBurstCapture(handlePhotoCaptured, handleBurstComplete, activeFilterObj);
     } catch (err) {
       console.error('handleStartBurst error:', err);
     }
-  }, [camera, handlePhotoCaptured, handleBurstComplete]);
+  }, [camera, handlePhotoCaptured, handleBurstComplete, activeFilterId]);
 
   // Reset photos safely
   const handleResetPhotos = useCallback(() => {
     try {
       setPhotos([]);
+      setSessionVideo(null);
     } catch (err) {
       console.warn('handleResetPhotos error:', err);
     }
@@ -278,6 +286,7 @@ export default function App() {
         onClose={() => setIsExportOpen(false)}
         template={activeTemplate}
         photos={photos}
+        sessionVideo={sessionVideo}
         filterId={activeFilterId}
         paperColor={paperColor}
         onUpdateFilter={setActiveFilterId}
