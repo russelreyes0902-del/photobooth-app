@@ -1,17 +1,21 @@
 import { getSupportedVideoMimeType } from './videoGenerator';
 
 export class LiveSessionRecorder {
-  constructor({ videoEl, isMirrored = true, lensZoomScale = 1.0, activeFilter = null, width = 720, height = 960 }) {
+  constructor({ videoEl, isMirrored = true, lensZoomScale = 1.0, activeFilter = null, width, height }) {
     this.videoEl = videoEl;
     this.isMirrored = isMirrored;
     this.lensZoomScale = lensZoomScale || 1.0;
     this.activeFilter = activeFilter;
-    this.width = width;
-    this.height = height;
+
+    // Match exact camera photo resolution and aspect ratio
+    const camW = videoEl?.videoWidth || 1280;
+    const camH = videoEl?.videoHeight || 720;
+    this.width = width || camW;
+    this.height = height || camH;
 
     this.canvas = document.createElement('canvas');
-    this.canvas.width = width;
-    this.canvas.height = height;
+    this.canvas.width = this.width;
+    this.canvas.height = this.height;
     this.ctx = this.canvas.getContext('2d', { alpha: false, willReadFrequently: true });
 
     this.mediaRecorder = null;
@@ -84,7 +88,7 @@ export class LiveSessionRecorder {
       ctx.fillStyle = '#0a0b0e';
       ctx.fillRect(0, 0, w, h);
 
-      // Draw camera video feed
+      // Draw camera video feed matching exact camera photo framing and aspect ratio
       if (this.videoEl && this.videoEl.videoWidth > 0 && this.videoEl.videoHeight > 0) {
         ctx.save();
         if (this.isMirrored) {
@@ -100,7 +104,7 @@ export class LiveSessionRecorder {
         const vh = this.videoEl.videoHeight;
         const scale = this.lensZoomScale || 1.0;
 
-        // Source crop rectangle based on lens zoom scale (e.g. 1.38x on 1x mode)
+        // Source crop rectangle matching lens zoom scale (1.38x on 1x mode, 1.0x on 0.5x mode)
         const sw = vw / scale;
         const sh = vh / scale;
         const sx = (vw - sw) / 2;
@@ -123,38 +127,48 @@ export class LiveSessionRecorder {
       }
 
       // -------------------------------------------------------------
-      // PHOTOBOOTH HUD OVERLAYS
+      // PHOTOBOOTH HUD OVERLAYS (Scale dynamically with resolution)
       // -------------------------------------------------------------
+      const scaleFactor = Math.max(0.6, Math.min(1.8, w / 1280));
       const elapsedSec = ((Date.now() - this.startTime) / 1000).toFixed(1);
 
       // Top Left: Blinking Red REC Badge
       const isBlink = Math.floor(Date.now() / 500) % 2 === 0;
+      const recDotX = 36 * scaleFactor;
+      const recDotY = 38 * scaleFactor;
+      const recDotRadius = 7 * scaleFactor;
+
       if (isBlink) {
         ctx.fillStyle = '#ef4444';
         ctx.beginPath();
-        ctx.arc(36, 42, 7, 0, Math.PI * 2);
+        ctx.arc(recDotX, recDotY, recDotRadius, 0, Math.PI * 2);
         ctx.fill();
       }
       ctx.fillStyle = '#ffffff';
-      ctx.font = '700 13px system-ui, sans-serif';
+      ctx.font = `700 ${Math.round(14 * scaleFactor)}px system-ui, sans-serif`;
       ctx.textAlign = 'left';
       ctx.textBaseline = 'middle';
-      ctx.fillText(`REC ${elapsedSec}s`, 52, 42);
+      ctx.fillText(`REC ${elapsedSec}s`, recDotX + 16 * scaleFactor, recDotY);
 
       // Top Right: Shot counter badge
+      const badgeW = 120 * scaleFactor;
+      const badgeH = 34 * scaleFactor;
+      const badgeX = w - badgeW - 24 * scaleFactor;
+      const badgeY = 22 * scaleFactor;
+
       ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
       ctx.beginPath();
       if (typeof ctx.roundRect === 'function') {
-        ctx.roundRect(w - 130, 26, 105, 32, 8);
+        ctx.roundRect(badgeX, badgeY, badgeW, badgeH, 8 * scaleFactor);
       } else {
-        ctx.rect(w - 130, 26, 105, 32);
+        ctx.rect(badgeX, badgeY, badgeW, badgeH);
       }
       ctx.fill();
 
       ctx.fillStyle = '#ffffff';
-      ctx.font = '700 13px system-ui, sans-serif';
+      ctx.font = `700 ${Math.round(13 * scaleFactor)}px system-ui, sans-serif`;
       ctx.textAlign = 'center';
-      ctx.fillText(`SHOT 0${this.currentShot} / 04`, w - 77, 42);
+      ctx.fillText(`SHOT 0${this.currentShot} / 04`, badgeX + badgeW / 2, badgeY + badgeH / 2);
 
       // Center: Countdown Number or "Smile!"
       if (this.countdown !== null && !this.isFlashing) {
@@ -163,25 +177,28 @@ export class LiveSessionRecorder {
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
 
+        const isNum = typeof this.countdown === 'number';
+        const pillW = (isNum ? 140 : 260) * scaleFactor;
+        const pillH = (isNum ? 140 : 80) * scaleFactor;
+        const fontSz = (isNum ? 84 : 44) * scaleFactor;
+
         // Dark glowing backing pill
         ctx.fillStyle = 'rgba(0, 0, 0, 0.55)';
         ctx.beginPath();
-        const pillW = typeof this.countdown === 'number' ? 140 : 220;
-        const pillH = typeof this.countdown === 'number' ? 140 : 70;
         if (typeof ctx.roundRect === 'function') {
-          ctx.roundRect((w - pillW) / 2, (h - pillH) / 2, pillW, pillH, 24);
+          ctx.roundRect((w - pillW) / 2, (h - pillH) / 2, pillW, pillH, 20 * scaleFactor);
         } else {
           ctx.rect((w - pillW) / 2, (h - pillH) / 2, pillW, pillH);
         }
         ctx.fill();
 
-        if (typeof this.countdown === 'number') {
+        if (isNum) {
           ctx.fillStyle = '#ffffff';
-          ctx.font = '900 80px monospace, system-ui';
+          ctx.font = `900 ${Math.round(fontSz)}px monospace, system-ui`;
           ctx.fillText(text, w / 2, h / 2);
         } else {
           ctx.fillStyle = '#ff6b95';
-          ctx.font = '800 42px system-ui, sans-serif';
+          ctx.font = `800 ${Math.round(fontSz)}px system-ui, sans-serif`;
           ctx.fillText(text, w / 2, h / 2);
         }
         ctx.restore();

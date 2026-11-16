@@ -336,15 +336,17 @@ export function useCamera() {
       setIsCapturingBurst(true);
       setBurstProgress(0);
 
-      // Initialize live session video recorder
+      // Initialize live session video recorder matching exact camera photo resolution
       if (videoRef.current) {
+        const camW = videoRef.current.videoWidth || 1280;
+        const camH = videoRef.current.videoHeight || 720;
         liveRecorder = new LiveSessionRecorder({
           videoEl: videoRef.current,
           isMirrored,
           lensZoomScale,
           activeFilter: activeFilterObj,
-          width: 720,
-          height: 960,
+          width: camW,
+          height: camH,
         });
         liveRecorder.start();
       }

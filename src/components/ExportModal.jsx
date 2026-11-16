@@ -196,6 +196,69 @@ export default function ExportModal({
     }
   };
 
+  // Helper to trigger safe file download across iOS Safari, iPadOS, Chrome, and Desktop
+  const downloadBlobOrShare = async (blob, filename, mimeType, successMsg) => {
+    try {
+      if (!blob) throw new Error('No data blob available to download');
+
+      const isIOS =
+        typeof navigator !== 'undefined' &&
+        (/iPad|iPhone|iPod/.test(navigator.userAgent) ||
+          (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1));
+
+      // On iOS / iPadOS Safari, Web Share API with File object is the most reliable way to save to Camera Roll or Files
+      if (isIOS && navigator.share && navigator.canShare) {
+        try {
+          const file = new File([blob], filename, { type: mimeType });
+          if (navigator.canShare({ files: [file] })) {
+            await navigator.share({
+              files: [file],
+              title: 'RetroBooth Strip',
+            });
+            setStatusMessage('Saved / Shared successfully!');
+            setTimeout(() => setStatusMessage(null), 2500);
+            return;
+          }
+        } catch (shareErr) {
+          if (shareErr.name === 'AbortError') {
+            return; // User canceled the share sheet
+          }
+          console.warn('Native share failed or declined, falling back to direct blob anchor:', shareErr);
+        }
+      }
+
+      // Standard desktop & mobile fallback via object URL
+      const blobUrl = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.style.display = 'none';
+      link.href = blobUrl;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+
+      // Clean up
+      setTimeout(() => {
+        try {
+          document.body.removeChild(link);
+          URL.revokeObjectURL(blobUrl);
+        } catch (cleanErr) {}
+      }, 2000);
+
+      setStatusMessage(successMsg || 'Downloaded successfully!');
+      setTimeout(() => setStatusMessage(null), 2500);
+    } catch (err) {
+      console.error('downloadBlobOrShare error:', err);
+      // Ultimate fallback: open in new tab
+      try {
+        const blobUrl = URL.createObjectURL(blob);
+        window.open(blobUrl, '_blank');
+      } catch (e) {
+        setErrorMessage('Could not export file. Please try again.');
+        setTimeout(() => setErrorMessage(null), 3000);
+      }
+    }
+  };
+
   // Download High-Res PNG
   const handleDownloadPng = () => {
     try {
@@ -204,13 +267,22 @@ export default function ExportModal({
         setErrorMessage('Canvas is not ready for download.');
         return;
       }
-      const dataUrl = canvas.toDataURL('image/png', 1.0);
-      const link = document.createElement('a');
-      link.download = `retrobooth-strip-${Date.now()}.png`;
-      link.href = dataUrl;
-      link.click();
-      setStatusMessage('PNG downloaded successfully!');
-      setTimeout(() => setStatusMessage(null), 2500);
+      canvas.toBlob(
+        async (blob) => {
+          if (!blob) {
+            setErrorMessage('Could not generate PNG data.');
+            return;
+          }
+          await downloadBlobOrShare(
+            blob,
+            `retrobooth-strip-${Date.now()}.png`,
+            'image/png',
+            'PNG downloaded successfully!'
+          );
+        },
+        'image/png',
+        1.0
+      );
     } catch (err) {
       console.error('Download PNG caught error:', err);
       setErrorMessage('Could not export PNG. Please try again.');
@@ -226,13 +298,22 @@ export default function ExportModal({
         setErrorMessage('Canvas is not ready for download.');
         return;
       }
-      const dataUrl = canvas.toDataURL('image/jpeg', 0.95);
-      const link = document.createElement('a');
-      link.download = `retrobooth-strip-${Date.now()}.jpg`;
-      link.href = dataUrl;
-      link.click();
-      setStatusMessage('JPG downloaded successfully!');
-      setTimeout(() => setStatusMessage(null), 2500);
+      canvas.toBlob(
+        async (blob) => {
+          if (!blob) {
+            setErrorMessage('Could not generate JPG data.');
+            return;
+          }
+          await downloadBlobOrShare(
+            blob,
+            `retrobooth-strip-${Date.now()}.jpg`,
+            'image/jpeg',
+            'JPG downloaded successfully!'
+          );
+        },
+        'image/jpeg',
+        0.95
+      );
     } catch (err) {
       console.error('Download JPG caught error:', err);
       setErrorMessage('Could not export JPG. Please try again.');
@@ -241,18 +322,30 @@ export default function ExportModal({
   };
 
   // Download Video
-  const handleDownloadVideo = () => {
+  const handleDownloadVideo = async () => {
     try {
-      if (!videoUrl) {
+      if (!videoBlob && !videoUrl) {
         setErrorMessage('Video is still processing, please wait a moment.');
         return;
       }
-      const link = document.createElement('a');
-      link.download = `retrobooth-live-video-${Date.now()}.${videoExt}`;
-      link.href = videoUrl;
-      link.click();
-      setStatusMessage(`Live Video (${videoExt.toUpperCase()}) downloaded successfully!`);
-      setTimeout(() => setStatusMessage(null), 2500);
+      const filename = `retrobooth-live-video-${Date.now()}.${videoExt}`;
+      const mimeType = videoBlob?.type || (videoExt === 'mp4' ? 'video/mp4' : 'video/webm');
+
+      if (videoBlob) {
+        await downloadBlobOrShare(
+          videoBlob,
+          filename,
+          mimeType,
+          `Live Video (${videoExt.toUpperCase()}) downloaded successfully!`
+        );
+      } else {
+        const link = document.createElement('a');
+        link.download = filename;
+        link.href = videoUrl;
+        link.click();
+        setStatusMessage(`Live Video (${videoExt.toUpperCase()}) downloaded successfully!`);
+        setTimeout(() => setStatusMessage(null), 2500);
+      }
     } catch (err) {
       console.error('Download Video caught error:', err);
       setErrorMessage('Could not download video.');
@@ -261,22 +354,34 @@ export default function ExportModal({
   };
 
   // Download GIF
-  const handleDownloadGif = () => {
+  const handleDownloadGif = async () => {
     try {
       if (!gifUrl) {
         setErrorMessage('GIF is still generating, please wait a moment.');
         return;
       }
-      const link = document.createElement('a');
-      link.download = `retrobooth-animation-${Date.now()}.gif`;
-      link.href = gifUrl;
-      link.click();
-      setStatusMessage('GIF downloaded successfully!');
-      setTimeout(() => setStatusMessage(null), 2500);
+      const response = await fetch(gifUrl);
+      const blob = await response.blob();
+      await downloadBlobOrShare(
+        blob,
+        `retrobooth-animation-${Date.now()}.gif`,
+        'image/gif',
+        'GIF downloaded successfully!'
+      );
     } catch (err) {
       console.error('Download GIF caught error:', err);
-      setErrorMessage('Could not download GIF.');
-      setTimeout(() => setErrorMessage(null), 3000);
+      // Fallback to simple link click
+      try {
+        const link = document.createElement('a');
+        link.download = `retrobooth-animation-${Date.now()}.gif`;
+        link.href = gifUrl;
+        link.click();
+        setStatusMessage('GIF downloaded successfully!');
+        setTimeout(() => setStatusMessage(null), 2500);
+      } catch (e) {
+        setErrorMessage('Could not download GIF.');
+        setTimeout(() => setErrorMessage(null), 3000);
+      }
     }
   };
 
