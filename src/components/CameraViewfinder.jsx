@@ -13,6 +13,7 @@ import {
   SlidersHorizontal,
   Volume2,
   VolumeX,
+  X,
 } from 'lucide-react';
 import { getFilterById } from '../utils/filters';
 
@@ -283,6 +284,31 @@ export default function CameraViewfinder({
               ))}
             </div>
           </div>
+
+          <div>
+            <span className="text-[11px] font-bold uppercase tracking-wider text-rose-400">Capture Quality</span>
+            <div className="grid grid-cols-3 gap-1.5 mt-1.5">
+              {[
+                { id: 'auto', label: 'Auto' },
+                { id: 'high', label: 'High (2K)' },
+                { id: 'max', label: 'Max' },
+              ].map(q => (
+                <button
+                  key={q.id}
+                  onClick={() => {
+                    if (camera.setCaptureQuality) camera.setCaptureQuality(q.id);
+                  }}
+                  className={`py-1 px-1.5 rounded-xl font-bold text-[10px] transition-all ${
+                    camera.captureQuality === q.id
+                      ? 'bg-emerald-500 text-white'
+                      : 'bg-white/5 text-slate-300 hover:bg-white/10'
+                  }`}
+                >
+                  {q.label}
+                </button>
+              ))}
+            </div>
+          </div>
         </div>
       )}
 
@@ -400,37 +426,52 @@ export default function CameraViewfinder({
           </div>
         )}
 
-        {/* 0.5x vs 1x LENS TOGGLE PILL: Only shown if hardware ultra-wide / iPad exists! */}
-        {camera.hasHardwareUltraWide && (
-          <div className="absolute bottom-24 z-30 flex items-center justify-center pointer-events-auto">
-            <div className="flex items-center gap-1 p-1 bg-black/60 backdrop-blur-md rounded-full border border-white/15 shadow-xl">
-              <button
-                onClick={() => {
-                  try { camera.setLensMode('0.5x'); } catch (e) {}
-                }}
-                className={`px-3 py-1 rounded-full text-xs font-bold transition-all ${
-                  camera.lensMode === '0.5x'
-                    ? 'bg-amber-400 text-black shadow-md'
-                    : 'text-white/80 hover:text-white'
-                }`}
-              >
-                0.5x
-              </button>
-              <button
-                onClick={() => {
-                  try { camera.setLensMode('1x'); } catch (e) {}
-                }}
-                className={`px-3 py-1 rounded-full text-xs font-bold transition-all ${
-                  camera.lensMode === '1x'
-                    ? 'bg-amber-400 text-black shadow-md'
-                    : 'text-white/80 hover:text-white'
-                }`}
-              >
-                1x
-              </button>
-            </div>
+        {/* IN-FLIGHT BURST CANCELLATION BUTTON */}
+        {camera.isCapturingBurst && (
+          <div className="absolute top-16 z-40 flex items-center justify-center pointer-events-auto animate-fade-in">
+            <button
+              onClick={() => {
+                try {
+                  if (camera.cancelCaptureSession) camera.cancelCaptureSession();
+                } catch (e) {}
+              }}
+              className="flex items-center gap-1.5 px-3.5 py-1.5 bg-rose-600/90 hover:bg-rose-700 text-white font-bold text-xs rounded-full shadow-2xl border border-white/20 backdrop-blur-md active:scale-95 transition-all"
+            >
+              <X className="w-3.5 h-3.5" />
+              <span>Cancel Session</span>
+            </button>
           </div>
         )}
+
+        {/* 0.5x vs 1x FRAMING TOGGLE PILL: Clear wide-angle framing toggle */}
+        <div className="absolute bottom-24 z-30 flex items-center justify-center pointer-events-auto">
+          <div className="flex items-center gap-1 p-1 bg-black/60 backdrop-blur-md rounded-full border border-white/15 shadow-xl">
+            <button
+              onClick={() => {
+                try { camera.setLensMode('0.5x'); } catch (e) {}
+              }}
+              className={`px-3 py-1 rounded-full text-xs font-bold transition-all ${
+                camera.lensMode === '0.5x'
+                  ? 'bg-amber-400 text-black shadow-md'
+                  : 'text-white/80 hover:text-white'
+              }`}
+            >
+              0.5x Wide
+            </button>
+            <button
+              onClick={() => {
+                try { camera.setLensMode('1x'); } catch (e) {}
+              }}
+              className={`px-3 py-1 rounded-full text-xs font-bold transition-all ${
+                camera.lensMode === '1x'
+                  ? 'bg-amber-400 text-black shadow-md'
+                  : 'text-white/80 hover:text-white'
+              }`}
+            >
+              1x Normal
+            </button>
+          </div>
+        </div>
       </div>
 
       {/* ============================================================ */}

@@ -130,10 +130,14 @@ export default function App() {
   }, [camera, handlePhotoCaptured, handleBurstComplete, activeFilterId, activeTemplate?.slotCount]);
 
   // Handle manual single shot capture
-  const handleManualCapture = useCallback(() => {
+  const handleManualCapture = useCallback(async () => {
     try {
-      const nextIndex = photos.length < camera.captureCount ? photos.length : 0;
-      const frame = camera.grabFrame(nextIndex);
+      // Find first empty slot or cycle
+      let nextIndex = photos.findIndex(p => !p);
+      if (nextIndex === -1) {
+        nextIndex = photos.length < camera.captureCount ? photos.length : 0;
+      }
+      const frame = await camera.capturePhoto(nextIndex);
       if (frame) {
         setPhotos(prev => {
           const next = [...prev];
@@ -147,7 +151,7 @@ export default function App() {
     } catch (e) {
       console.warn('Manual capture error:', e);
     }
-  }, [camera, photos.length]);
+  }, [camera, photos]);
 
   // Individual Shot Retake
   const handleRetakeShot = useCallback(async (slotIndex) => {

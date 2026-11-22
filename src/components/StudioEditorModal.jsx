@@ -11,23 +11,21 @@ import {
   Redo2, 
   RotateCw, 
   FlipHorizontal, 
-  ZoomIn, 
-  ZoomOut, 
   Trash2, 
-  Copy, 
   Plus, 
   Download, 
   Save, 
   X, 
   Palette, 
-  Square,
-  Check
+  Check,
+  Search,
+  RotateCcw
 } from 'lucide-react';
-import { FILTERS, FILTER_CATEGORIES, getFilterById } from '../utils/filters';
-import { PAPER_COLORS, PAPER_PATTERNS, BUILTIN_TEMPLATES, getTemplateById } from '../utils/templates';
-import { STICKER_LIBRARY, STICKER_CATEGORIES } from '../utils/stickers';
-import { renderPhotoStrip } from '../utils/canvasCompositor';
-import { saveProject } from '../utils/storage';
+import { FILTERS, FILTER_CATEGORIES, getFilterById } from '../utils/filters.js';
+import { PAPER_COLORS, PAPER_PATTERNS, BUILTIN_TEMPLATES, getTemplateById } from '../utils/templates.js';
+import { STICKER_LIBRARY, STICKER_CATEGORIES } from '../utils/stickers.js';
+import { renderPhotoStrip } from '../utils/canvasCompositor.js';
+import { saveProject } from '../utils/storage.js';
 
 export default function StudioEditorModal({
   isOpen,
@@ -36,21 +34,23 @@ export default function StudioEditorModal({
   photos = [],
   template: propTemplate,
   customTemplates = [],
-  filterId: propFilterId = 'normal',
+  filterId: propFilterId = 'clean-original',
   paperColor: propPaperColor = '#ffffff',
   onOpenExport,
   onSaveToGallerySuccess,
 }) {
   const canvasRef = useRef(null);
 
-  // Active Tab: 'templates' | 'filters' | 'adjustments' | 'position' | 'stickers' | 'text' | 'borders'
+  // Active Tool Tab
   const [activeTab, setActiveTab] = useState('filters');
+  const [filterCategory, setFilterCategory] = useState('all');
+  const [filterSearch, setFilterSearch] = useState('');
 
-  // Core State
+  // Core Design State
   const [templateId, setTemplateId] = useState(propTemplate?.id || 'denim');
   const [paperColor, setPaperColor] = useState(propPaperColor || '#ffffff');
   const [paperPattern, setPaperPattern] = useState('none');
-  const [filterId, setFilterId] = useState(propFilterId || 'normal');
+  const [filterId, setFilterId] = useState(propFilterId || 'clean-original');
   const [filterIntensity, setFilterIntensity] = useState(100);
 
   // Global & Per-Photo adjustments
@@ -89,34 +89,74 @@ export default function StudioEditorModal({
   const [history, setHistory] = useState([]);
   const [historyIndex, setHistoryIndex] = useState(-1);
   const isApplyingHistory = useRef(false);
+  const snapshotDebounceTimer = useRef(null);
 
   // Notification state
   const [toastMessage, setToastMessage] = useState(null);
 
-  const currentTemplate = customTemplates.find(t => t.id === templateId) || getTemplateById(templateId) || BUILTIN_TEMPLATES[0];
+  // Hydrate state from initialProject or props when modal opens
+  useEffect(() => {
+    if (isOpen) {
+      if (initialProject) {
+        if (initialProject.templateId) setTemplateId(initialProject.templateId);
+        if (initialProject.paperColor) setPaperColor(initialProject.paperColor);
+        if (initialProject.paperPattern) setPaperPattern(initialProject.paperPattern);
+        if (initialProject.filterId) setFilterId(initialProject.filterId);
+        if (initialProject.filterIntensity !== undefined) setFilterIntensity(initialProject.filterIntensity);
+        if (initialProject.adjustments) setAdjustments(initialProject.adjustments);
+        if (initialProject.photoTransforms) setPhotoTransforms(initialProject.photoTransforms);
+        if (initialProject.borders) setBorders(initialProject.borders);
+        if (initialProject.stickers) setStickers(initialProject.stickers);
+        if (initialProject.texts) setTexts(initialProject.texts);
+      } else {
+        if (propTemplate?.id) setTemplateId(propTemplate.id);
+        if (propFilterId) setFilterId(propFilterId);
+        if (propPaperColor) setPaperColor(propPaperColor);
+      }
 
-  // Snapshot current state for Undo/Redo
-  const pushStateSnapshot = useCallback((partialState = {}) => {
+      // Initialize clean history baseline
+      setHistory([]);
+      setHistoryIndex(-1);
+    }
+  }, [isOpen, initialProject, propTemplate, propFilterId, propPaperColor]);
+
+  const currentTemplate = customTemplates.find(t => t.id === templateId) || 
+    getTemplateById(templateId, customTemplates) || 
+    BUILTIN_TEMPLATES[0];
+
+  // Debounced snapshot taker to group continuous slider drags into 1 history step
+  const pushStateSnapshot = useCallback((partialState = {}, immediate = false) => {
     if (isApplyingHistory.current) return;
-    const snapshot = {
-      templateId,
-      paperColor,
-      paperPattern,
-      filterId,
-      filterIntensity,
-      adjustments: { ...adjustments },
-      photoTransforms: { ...photoTransforms },
-      borders: { ...borders },
-      stickers: [...stickers],
-      texts: [...texts],
-      ...partialState,
+
+    const recordSnapshot = () => {
+      const snapshot = {
+        templateId,
+        paperColor,
+        paperPattern,
+        filterId,
+        filterIntensity,
+        adjustments: { ...adjustments },
+        photoTransforms: { ...photoTransforms },
+        borders: { ...borders },
+        stickers: [...stickers],
+        texts: [...texts],
+        ...partialState,
+      };
+
+      setHistory(prev => {
+        const upToCurrent = prev.slice(0, historyIndex + 1);
+        return [...upToCurrent, snapshot].slice(-25);
+      });
+      setHistoryIndex(prev => prev + 1);
     };
 
-    setHistory(prev => {
-      const upToCurrent = prev.slice(0, historyIndex + 1);
-      return [...upToCurrent, snapshot].slice(-25); // retain last 25 steps
-    });
-    setHistoryIndex(prev => prev + 1);
+    if (immediate) {
+      if (snapshotDebounceTimer.current) clearTimeout(snapshotDebounceTimer.current);
+      recordSnapshot();
+    } else {
+      if (snapshotDebounceTimer.current) clearTimeout(snapshotDebounceTimer.current);
+      snapshotDebounceTimer.current = setTimeout(recordSnapshot, 350);
+    }
   }, [templateId, paperColor, paperPattern, filterId, filterIntensity, adjustments, photoTransforms, borders, stickers, texts, historyIndex]);
 
   // Undo action
@@ -159,9 +199,15 @@ export default function StudioEditorModal({
     }
   }, [history, historyIndex]);
 
-  // Keyboard shortcut for Undo / Redo
+  // Guard keyboard shortcuts: never trigger while user is typing in input or textarea
   useEffect(() => {
     const handleKeyDown = (e) => {
+      const target = e.target;
+      if (target) {
+        const tag = target.tagName ? target.tagName.toUpperCase() : '';
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || target.isContentEditable) return;
+      }
+
       if ((e.ctrlKey || e.metaKey) && e.key === 'z') {
         e.preventDefault();
         if (e.shiftKey) handleRedo();
@@ -209,7 +255,7 @@ export default function StudioEditorModal({
   // Selected slot transform helper
   const curTransform = photoTransforms[selectedSlotIndex] || { panX: 0, panY: 0, zoom: 1.0, rotate: 0, mirror: false };
 
-  const updateSelectedSlotTransform = (patch) => {
+  const updateSelectedSlotTransform = (patch, immediate = false) => {
     const nextTransforms = {
       ...photoTransforms,
       [selectedSlotIndex]: {
@@ -218,7 +264,7 @@ export default function StudioEditorModal({
       },
     };
     setPhotoTransforms(nextTransforms);
-    pushStateSnapshot({ photoTransforms: nextTransforms });
+    pushStateSnapshot({ photoTransforms: nextTransforms }, immediate);
   };
 
   // Sticker helpers
@@ -236,14 +282,14 @@ export default function StudioEditorModal({
     const nextStickers = [...stickers, newSticker];
     setStickers(nextStickers);
     setSelectedStickerId(newSticker.id);
-    pushStateSnapshot({ stickers: nextStickers });
+    pushStateSnapshot({ stickers: nextStickers }, true);
   };
 
   const handleDeleteSticker = (id) => {
     const nextStickers = stickers.filter(s => s.id !== id);
     setStickers(nextStickers);
     if (selectedStickerId === id) setSelectedStickerId(null);
-    pushStateSnapshot({ stickers: nextStickers });
+    pushStateSnapshot({ stickers: nextStickers }, true);
   };
 
   // Text helpers
@@ -264,14 +310,14 @@ export default function StudioEditorModal({
     const nextTexts = [...texts, newText];
     setTexts(nextTexts);
     setSelectedTextId(newText.id);
-    pushStateSnapshot({ texts: nextTexts });
+    pushStateSnapshot({ texts: nextTexts }, true);
   };
 
   const handleDeleteText = (id) => {
     const nextTexts = texts.filter(t => t.id !== id);
     setTexts(nextTexts);
     if (selectedTextId === id) setSelectedTextId(null);
-    pushStateSnapshot({ texts: nextTexts });
+    pushStateSnapshot({ texts: nextTexts }, true);
   };
 
   // Save to Gallery in IndexedDB
@@ -307,6 +353,13 @@ export default function StudioEditorModal({
       setTimeout(() => setToastMessage(null), 2500);
     }
   };
+
+  // Filter list by category & search query
+  const filteredFilters = FILTERS.filter(f => {
+    if (filterCategory !== 'all' && f.category !== filterCategory) return false;
+    if (filterSearch && !f.name.toLowerCase().includes(filterSearch.toLowerCase()) && !f.description.toLowerCase().includes(filterSearch.toLowerCase())) return false;
+    return true;
+  });
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-2 sm:p-4 md:p-6 bg-black/90 backdrop-blur-md animate-fade-in select-none">
@@ -401,17 +454,17 @@ export default function StudioEditorModal({
         )}
 
         {/* ============================================================ */}
-        {/* WORKSPACE BODY: LEFT TOOLS + CENTER CANVAS + RIGHT PROPS */}
+        {/* WORKSPACE BODY */}
         {/* ============================================================ */}
         <div className="flex-1 min-h-0 flex flex-col md:flex-row overflow-hidden">
           
           {/* LEFT ICON TAB NAVIGATION */}
           <nav className="w-full md:w-16 bg-studio-900 border-b md:border-b-0 md:border-r border-white/10 p-2 flex md:flex-col items-center justify-around md:justify-start gap-1 md:gap-3 flex-shrink-0 z-20 overflow-x-auto">
             {[
-              { id: 'filters', label: 'Filters', icon: Wand2, color: 'text-rose-400' },
+              { id: 'filters', label: '35 Filters', icon: Wand2, color: 'text-rose-400' },
               { id: 'adjustments', label: 'Tone', icon: Sliders, color: 'text-amber-400' },
               { id: 'position', label: 'Crop', icon: Crop, color: 'text-cyan-400' },
-              { id: 'stickers', label: 'Stickers', icon: Smile, color: 'text-yellow-400' },
+              { id: 'stickers', label: 'Deco', icon: Smile, color: 'text-yellow-400' },
               { id: 'text', label: 'Text', icon: Type, color: 'text-purple-400' },
               { id: 'borders', label: 'Paper', icon: Palette, color: 'text-pink-400' },
             ].map(tab => {
@@ -435,73 +488,100 @@ export default function StudioEditorModal({
             })}
           </nav>
 
-          {/* TOOL SETTINGS DRAWER / PANEL */}
-          <div className="w-full md:w-72 bg-studio-900/90 border-b md:border-b-0 md:border-r border-white/10 p-4 flex flex-col overflow-y-auto flex-shrink-0">
+          {/* TOOL SETTINGS DRAWER */}
+          <div className="w-full md:w-80 bg-studio-900/90 border-b md:border-b-0 md:border-r border-white/10 p-4 flex flex-col overflow-y-auto flex-shrink-0">
             
-            {/* TAB: FILTERS */}
+            {/* TAB: 35 CURATED FILTERS */}
             {activeTab === 'filters' && (
-              <div className="flex flex-col gap-4">
-                <div>
-                  <h3 className="text-xs font-bold text-white uppercase tracking-wider mb-2">Filter Preset</h3>
-                  
-                  {/* Intensity slider */}
-                  <div className="flex flex-col gap-1.5 p-2.5 rounded-xl bg-black/40 border border-white/5 mb-3">
-                    <div className="flex justify-between text-[11px] font-semibold text-slate-300">
-                      <span>Intensity</span>
-                      <span className="font-mono text-rose-400">{filterIntensity}%</span>
-                    </div>
-                    <input
-                      type="range"
-                      min={0}
-                      max={100}
-                      value={filterIntensity}
-                      onChange={(e) => {
-                        const val = Number(e.target.value);
-                        setFilterIntensity(val);
-                        pushStateSnapshot({ filterIntensity: val });
-                      }}
-                      className="w-full accent-rose-500 cursor-pointer"
-                    />
-                  </div>
+              <div className="flex flex-col gap-3">
+                <div className="flex items-center justify-between">
+                  <h3 className="text-xs font-bold text-white uppercase tracking-wider">35 Curated Filters</h3>
+                  <span className="text-[10px] text-slate-400">{filteredFilters.length} presets</span>
+                </div>
 
-                  {/* Filter Categories */}
-                  {FILTER_CATEGORIES.map(cat => {
-                    const catFilters = FILTERS.filter(f => f.category === cat.id || (cat.id === 'film' && f.id === 'normal'));
+                {/* Filter Search */}
+                <div className="relative">
+                  <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
+                  <input
+                    type="text"
+                    placeholder="Search filters..."
+                    value={filterSearch}
+                    onChange={(e) => setFilterSearch(e.target.value)}
+                    className="w-full bg-studio-950 border border-white/10 rounded-xl pl-8 pr-3 py-1.5 text-xs text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-rose-500"
+                  />
+                </div>
+
+                {/* Filter Category Tabs */}
+                <div className="flex items-center gap-1 overflow-x-auto pb-1 scrollbar-none text-[10px]">
+                  <button
+                    onClick={() => setFilterCategory('all')}
+                    className={`px-2 py-0.5 rounded-lg font-bold whitespace-nowrap transition-all ${
+                      filterCategory === 'all' ? 'bg-rose-500 text-white' : 'text-slate-400 hover:text-white'
+                    }`}
+                  >
+                    All (35)
+                  </button>
+                  {FILTER_CATEGORIES.map(cat => (
+                    <button
+                      key={cat.id}
+                      onClick={() => setFilterCategory(cat.id)}
+                      className={`px-2 py-0.5 rounded-lg font-bold whitespace-nowrap transition-all ${
+                        filterCategory === cat.id ? 'bg-rose-500 text-white' : 'text-slate-400 hover:text-white'
+                      }`}
+                    >
+                      {cat.name.split(' ')[0]}
+                    </button>
+                  ))}
+                </div>
+
+                {/* Intensity slider */}
+                <div className="flex flex-col gap-1 p-2.5 rounded-xl bg-black/40 border border-white/5">
+                  <div className="flex justify-between text-[11px] font-semibold text-slate-300">
+                    <span>Filter Intensity</span>
+                    <span className="font-mono text-rose-400">{filterIntensity}%</span>
+                  </div>
+                  <input
+                    type="range"
+                    min={0}
+                    max={100}
+                    value={filterIntensity}
+                    onChange={(e) => {
+                      const val = Number(e.target.value);
+                      setFilterIntensity(val);
+                      pushStateSnapshot({ filterIntensity: val });
+                    }}
+                    className="w-full accent-rose-500 cursor-pointer"
+                  />
+                </div>
+
+                {/* Filter Grid */}
+                <div className="grid grid-cols-2 gap-1.5 max-h-[380px] overflow-y-auto pr-1">
+                  {filteredFilters.map(f => {
+                    const isSel = f.id === filterId;
                     return (
-                      <div key={cat.id} className="mb-3">
-                        <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block mb-1.5">
-                          {cat.name}
-                        </span>
-                        <div className="grid grid-cols-2 gap-1.5">
-                          {catFilters.map(f => {
-                            const isSel = f.id === filterId;
-                            return (
-                              <button
-                                key={f.id}
-                                onClick={() => {
-                                  setFilterId(f.id);
-                                  pushStateSnapshot({ filterId: f.id });
-                                }}
-                                className={`flex items-center gap-2 p-2 rounded-xl text-left border text-xs font-bold transition-all ${
-                                  isSel
-                                    ? 'bg-rose-500/20 border-rose-400 text-white shadow-sm'
-                                    : 'bg-black/30 border-white/5 text-slate-300 hover:bg-white/5'
-                                }`}
-                              >
-                                <div className={`w-3.5 h-3.5 rounded-full bg-gradient-to-tr ${f.previewGradient}`} />
-                                <span className="truncate">{f.name}</span>
-                              </button>
-                            );
-                          })}
-                        </div>
-                      </div>
+                      <button
+                        key={f.id}
+                        onClick={() => {
+                          setFilterId(f.id);
+                          pushStateSnapshot({ filterId: f.id }, true);
+                        }}
+                        title={f.description}
+                        className={`flex items-center gap-2 p-2 rounded-xl text-left border text-xs font-bold transition-all ${
+                          isSel
+                            ? 'bg-rose-500/20 border-rose-400 text-white shadow-sm'
+                            : 'bg-black/30 border-white/5 text-slate-300 hover:bg-white/5'
+                        }`}
+                      >
+                        <div className={`w-3.5 h-3.5 rounded-full bg-gradient-to-tr ${f.previewGradient} flex-shrink-0 shadow-sm`} />
+                        <span className="truncate">{f.name}</span>
+                      </button>
                     );
                   })}
                 </div>
               </div>
             )}
 
-            {/* TAB: ADJUSTMENTS */}
+            {/* TAB: TONE & COLOR ADJUSTMENTS */}
             {activeTab === 'adjustments' && (
               <div className="flex flex-col gap-3">
                 <div className="flex items-center justify-between">
@@ -510,22 +590,24 @@ export default function StudioEditorModal({
                     onClick={() => {
                       const resetAdj = { brightness: 0, contrast: 0, saturation: 0, exposure: 0, temperature: 0, tint: 0, grain: 0, vignette: 0, blur: 0 };
                       setAdjustments(resetAdj);
-                      pushStateSnapshot({ adjustments: resetAdj });
+                      pushStateSnapshot({ adjustments: resetAdj }, true);
                     }}
-                    className="text-[10px] text-rose-400 hover:underline"
+                    className="flex items-center gap-1 text-[10px] text-rose-400 hover:underline"
                   >
-                    Reset All
+                    <RotateCcw className="w-3 h-3" />
+                    <span>Reset All</span>
                   </button>
                 </div>
 
                 {[
+                  { key: 'exposure', label: 'Exposure', min: -50, max: 50 },
                   { key: 'brightness', label: 'Brightness', min: -50, max: 50 },
                   { key: 'contrast', label: 'Contrast', min: -50, max: 50 },
                   { key: 'saturation', label: 'Saturation', min: -50, max: 50 },
-                  { key: 'temperature', label: 'Warmth', min: -50, max: 50 },
-                  { key: 'tint', label: 'Tint (Green/Pink)', min: -50, max: 50 },
-                  { key: 'grain', label: 'Film Grain', min: 0, max: 100 },
-                  { key: 'vignette', label: 'Vignette', min: 0, max: 100 },
+                  { key: 'temperature', label: 'Warmth / Temperature', min: -50, max: 50 },
+                  { key: 'tint', label: 'Tint (Green / Magenta)', min: -50, max: 50 },
+                  { key: 'grain', label: 'Film Grain Texture', min: 0, max: 100 },
+                  { key: 'vignette', label: 'Vignette Falloff', min: 0, max: 100 },
                 ].map(item => (
                   <div key={item.key} className="flex flex-col gap-1 p-2 rounded-xl bg-black/30 border border-white/5">
                     <div className="flex justify-between text-[11px] font-semibold text-slate-300">
@@ -549,7 +631,7 @@ export default function StudioEditorModal({
               </div>
             )}
 
-            {/* TAB: POSITION & CROP */}
+            {/* TAB: CROP & POSITION */}
             {activeTab === 'position' && (
               <div className="flex flex-col gap-3">
                 <h3 className="text-xs font-bold text-white uppercase tracking-wider">Photo Positioning</h3>
@@ -625,7 +707,7 @@ export default function StudioEditorModal({
                 {/* Rotate & Mirror Buttons */}
                 <div className="grid grid-cols-2 gap-2 mt-1">
                   <button
-                    onClick={() => updateSelectedSlotTransform({ rotate: ((curTransform.rotate || 0) + 90) % 360 })}
+                    onClick={() => updateSelectedSlotTransform({ rotate: ((curTransform.rotate || 0) + 90) % 360 }, true)}
                     className="flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl bg-black/40 hover:bg-white/10 text-slate-200 border border-white/10 text-xs font-semibold"
                   >
                     <RotateCw className="w-3.5 h-3.5 text-accent-amber" />
@@ -633,7 +715,7 @@ export default function StudioEditorModal({
                   </button>
 
                   <button
-                    onClick={() => updateSelectedSlotTransform({ mirror: !curTransform.mirror })}
+                    onClick={() => updateSelectedSlotTransform({ mirror: !curTransform.mirror }, true)}
                     className={`flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl border text-xs font-semibold transition-all ${
                       curTransform.mirror
                         ? 'bg-rose-500/20 border-rose-400 text-rose-300'
@@ -646,7 +728,7 @@ export default function StudioEditorModal({
                 </div>
 
                 <button
-                  onClick={() => updateSelectedSlotTransform({ panX: 0, panY: 0, zoom: 1.0, rotate: 0, mirror: false })}
+                  onClick={() => updateSelectedSlotTransform({ panX: 0, panY: 0, zoom: 1.0, rotate: 0, mirror: false }, true)}
                   className="mt-2 py-2 text-xs font-bold text-slate-400 hover:text-white border border-white/10 rounded-xl"
                 >
                   Reset Slot {selectedSlotIndex + 1} Crop
@@ -654,7 +736,7 @@ export default function StudioEditorModal({
               </div>
             )}
 
-            {/* TAB: STICKERS */}
+            {/* TAB: STICKERS & DECO */}
             {activeTab === 'stickers' && (
               <div className="flex flex-col gap-3">
                 <div className="flex items-center justify-between">
@@ -662,7 +744,6 @@ export default function StudioEditorModal({
                   <span className="text-[10px] text-slate-400">{stickers.length} added</span>
                 </div>
 
-                {/* Sticker Library Grid */}
                 <div className="grid grid-cols-3 gap-2">
                   {STICKER_LIBRARY.map(st => (
                     <button
@@ -679,7 +760,6 @@ export default function StudioEditorModal({
                   ))}
                 </div>
 
-                {/* Active Sticker Properties */}
                 {selectedStickerId && (
                   <div className="mt-3 p-3 rounded-2xl bg-black/50 border border-white/10 flex flex-col gap-2.5">
                     <div className="flex items-center justify-between">
@@ -692,7 +772,6 @@ export default function StudioEditorModal({
                       </button>
                     </div>
 
-                    {/* Resize */}
                     <div className="flex flex-col gap-1">
                       <span className="text-[10px] text-slate-400">Scale Size</span>
                       <input
@@ -708,7 +787,6 @@ export default function StudioEditorModal({
                       />
                     </div>
 
-                    {/* Rotation */}
                     <div className="flex flex-col gap-1">
                       <span className="text-[10px] text-slate-400">Rotation</span>
                       <input
@@ -812,7 +890,7 @@ export default function StudioEditorModal({
                         key={p.id}
                         onClick={() => {
                           setPaperColor(p.color);
-                          pushStateSnapshot({ paperColor: p.color });
+                          pushStateSnapshot({ paperColor: p.color }, true);
                         }}
                         className={`h-8 rounded-xl border flex items-center justify-center transition-all ${
                           paperColor === p.color
@@ -839,7 +917,7 @@ export default function StudioEditorModal({
                         key={pat.id}
                         onClick={() => {
                           setPaperPattern(pat.id);
-                          pushStateSnapshot({ paperPattern: pat.id });
+                          pushStateSnapshot({ paperPattern: pat.id }, true);
                         }}
                         className={`p-2 rounded-xl text-left text-xs font-bold border transition-all ${
                           paperPattern === pat.id

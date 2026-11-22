@@ -2,9 +2,12 @@ import { buildComposedFilterString, getInterpolatedTintColor } from './filters.j
 import { calculateCoverCrop } from './geometry.js';
 import { getStickerById, loadStickerImage } from './stickers.js';
 
-// In-memory cache for loaded template images to avoid repeated network fetches
+// Cache for loaded images by URL or source
 const imageCache = new Map();
 
+/**
+ * Loads and caches an image source with safety timeout
+ */
 export function loadTemplateImage(src) {
   if (!src) return Promise.resolve(null);
   if (imageCache.has(src)) {
@@ -15,7 +18,6 @@ export function loadTemplateImage(src) {
       const img = new Image();
       img.crossOrigin = 'anonymous';
 
-      // Safety timeout: if image hangs longer than 4s, resolve null gracefully
       const timer = setTimeout(() => {
         resolve(null);
       }, 4000);
@@ -102,14 +104,13 @@ function drawBackgroundPattern(ctx, pattern, width, height) {
  * Composites the photobooth strip onto an HTML5 canvas.
  * Handles flexible templates (1, 2, 3, 4, 6 cuts), per-photo adjustments,
  * transform (pan, zoom, rotate, mirror), stickers, multiple text layers, and borders.
+ * Uses per-canvas sequence IDs to prevent cross-canvas rendering race conditions.
  */
-let renderSequenceId = 0;
-
 export async function renderPhotoStrip({
   canvas,
   template,
   photos = [],
-  filterId = 'normal',
+  filterId = 'clean-original',
   filterIntensity = 100,
   adjustments = {},
   photoTransforms = {},
@@ -120,20 +121,28 @@ export async function renderPhotoStrip({
   texts = [],
   dateStamp = true,
   customFooterText = '',
+  isPreview = false,
   cancelToken = null,
 }) {
-  const currentSeq = ++renderSequenceId;
+  if (!canvas || !template) return null;
+
+  // Track per-canvas sequence ID to avoid cross-canvas invalidation
+  canvas._renderSeqId = (canvas._renderSeqId || 0) + 1;
+  const currentSeq = canvas._renderSeqId;
 
   try {
-    if (!canvas || !template) return null;
-
     const ctx = canvas.getContext('2d', { willReadFrequently: true });
-    if (!ctx) return null;
+    if (!ctx) throw new Error('Failed to acquire canvas 2D rendering context');
 
-    const exportW = template.exportWidth || 1200;
-    const exportH = template.exportHeight || 3600;
+    let exportW = template.exportWidth || 1200;
+    let exportH = template.exportHeight || 3600;
 
-    // Set canvas physical buffer dimensions
+    // In preview mode, scale down buffer slightly for high-performance responsive redraws
+    if (isPreview) {
+      exportW = Math.round(exportW * 0.5);
+      exportH = Math.round(exportH * 0.5);
+    }
+
     if (canvas.width !== exportW || canvas.height !== exportH) {
       canvas.width = exportW;
       canvas.height = exportH;
@@ -162,7 +171,7 @@ export async function renderPhotoStrip({
     const slotCount = template.slotCount || cutouts.length || 4;
 
     for (let i = 0; i < slotCount; i++) {
-      if (cancelToken?.isCancelled || currentSeq !== renderSequenceId) return null;
+      if (cancelToken?.isCancelled || canvas._renderSeqId !== currentSeq) return null;
 
       const rawCutout = cutouts[i] || {
         x: 80,
@@ -182,23 +191,29 @@ export async function renderPhotoStrip({
 
       const photoItem = photos[i];
 
-      if (photoItem && (photoItem.img || photoItem.dataUrl)) {
+      if (photoItem && (photoItem.img || photoItem.dataUrl || photoItem.blob)) {
         let imgObj = photoItem.img;
         if (!imgObj && photoItem.dataUrl) {
-          imgObj = await new Promise((res) => {
-            try {
-              const im = new Image();
-              im.onload = () => res(im);
-              im.onerror = () => res(null);
-              im.src = photoItem.dataUrl;
-            } catch (e) {
-              res(null);
-            }
-          });
+          if (imageCache.has(photoItem.dataUrl)) {
+            imgObj = imageCache.get(photoItem.dataUrl);
+          } else {
+            imgObj = await new Promise((res) => {
+              try {
+                const im = new Image();
+                im.onload = () => {
+                  imageCache.set(photoItem.dataUrl, im);
+                  res(im);
+                };
+                im.onerror = () => res(null);
+                im.src = photoItem.dataUrl;
+              } catch (e) {
+                res(null);
+              }
+            });
+          }
         }
 
         if (imgObj) {
-          // Per-slot or global transform & adjustments
           const transform = photoTransforms[i] || {};
           const slotAdj = { ...adjustments, ...(transform.adjustments || {}) };
 
@@ -217,15 +232,15 @@ export async function renderPhotoStrip({
             ctx.closePath();
             ctx.clip();
 
-            // Apply filter
+            // Apply unified filter
             if (cssFilter && cssFilter !== 'none') {
               ctx.filter = cssFilter;
             }
 
             // Calculate precise cover crop with pan, zoom, rotate
             const crop = calculateCoverCrop({
-              sourceWidth: imgObj.width || imgObj.videoWidth,
-              sourceHeight: imgObj.height || imgObj.videoHeight,
+              sourceWidth: imgObj.naturalWidth || imgObj.width || imgObj.videoWidth,
+              sourceHeight: imgObj.naturalHeight || imgObj.height || imgObj.videoHeight,
               targetWidth: cutout.width,
               targetHeight: cutout.height,
               zoom: transform.zoom || 1.0,
@@ -234,7 +249,7 @@ export async function renderPhotoStrip({
               rotate: transform.rotate || 0,
             });
 
-            // Handle mirroring or rotation within slot
+            // Mirror & rotation handling
             if (transform.mirror || transform.rotate) {
               ctx.save();
               ctx.translate(cutout.x + cutout.width / 2, cutout.y + cutout.height / 2);
@@ -272,7 +287,7 @@ export async function renderPhotoStrip({
               ctx.fillRect(cutout.x, cutout.y, cutout.width, cutout.height);
             }
 
-            // Vignette effect if configured
+            // Vignette effect
             if (slotAdj.vignette && slotAdj.vignette > 0) {
               const vigFactor = Math.min(1, slotAdj.vignette / 100);
               const cx = cutout.x + cutout.width / 2;
@@ -285,7 +300,7 @@ export async function renderPhotoStrip({
               ctx.fillRect(cutout.x, cutout.y, cutout.width, cutout.height);
             }
 
-            // Film Grain effect if configured
+            // Film Grain effect
             if (slotAdj.grain && slotAdj.grain > 0) {
               const grainFactor = Math.min(1, slotAdj.grain / 100);
               ctx.fillStyle = `rgba(0, 0, 0, ${(0.08 * grainFactor).toFixed(3)})`;
@@ -302,7 +317,7 @@ export async function renderPhotoStrip({
             ctx.restore();
           }
 
-          // Optional photo slot border
+          // Photo slot border
           if (borders?.width && borders.width > 0) {
             ctx.save();
             try {
@@ -372,7 +387,6 @@ export async function renderPhotoStrip({
     // STEP 4: STICKERS & DECORATIONS LAYER
     // -------------------------------------------------------------
     if (Array.isArray(stickers) && stickers.length > 0) {
-      // Sort by zIndex if present
       const sortedStickers = [...stickers].sort((a, b) => (a.zIndex || 0) - (b.zIndex || 0));
 
       for (const st of sortedStickers) {
@@ -424,7 +438,6 @@ export async function renderPhotoStrip({
           ctx.textAlign = txt.align || 'center';
           ctx.textBaseline = 'middle';
 
-          // Optional text shadow
           if (txt.shadowColor) {
             ctx.shadowColor = txt.shadowColor;
             ctx.shadowBlur = 8 * scaleX;
@@ -432,7 +445,6 @@ export async function renderPhotoStrip({
             ctx.shadowOffsetY = 2 * scaleX;
           }
 
-          // Optional text outline
           if (txt.outlineColor && txt.outlineWidth) {
             ctx.strokeStyle = txt.outlineColor;
             ctx.lineWidth = txt.outlineWidth * scaleX;
@@ -468,7 +480,7 @@ export async function renderPhotoStrip({
 
     return canvas;
   } catch (err) {
-    console.error('Fatal safe renderPhotoStrip caught error:', err);
-    return canvas;
+    console.error('Fatal renderPhotoStrip error:', err);
+    throw err;
   }
 }

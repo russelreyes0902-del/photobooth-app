@@ -1,4 +1,5 @@
-import { getSupportedVideoMimeType } from './videoGenerator.js';
+import { getOptimalVideoMimeType } from './capabilities.js';
+import { calculateTargetBitrate, verifyVideoBlob } from './videoGenerator.js';
 import { calculateViewfinderCrop } from './geometry.js';
 
 export class LiveSessionRecorder {
@@ -8,9 +9,9 @@ export class LiveSessionRecorder {
     this.lensZoomScale = lensZoomScale || 1.0;
     this.activeFilter = activeFilter;
 
-    // Match exact camera photo resolution and aspect ratio
-    const camW = videoEl?.videoWidth || 1280;
-    const camH = videoEl?.videoHeight || 720;
+    // Match exact camera photo resolution
+    const camW = videoEl?.videoWidth || 1920;
+    const camH = videoEl?.videoHeight || 1080;
     this.width = width || camW;
     this.height = height || camH;
 
@@ -30,7 +31,7 @@ export class LiveSessionRecorder {
     this.currentShot = 1;
     this.countdown = null;
     this.isFlashing = false;
-    this.mimeInfo = getSupportedVideoMimeType();
+    this.mimeInfo = getOptimalVideoMimeType();
   }
 
   updateState({ shot, countdown, isFlashing, lensZoomScale, isMirrored, activeFilter }) {
@@ -50,7 +51,15 @@ export class LiveSessionRecorder {
       }
 
       this.stream = this.canvas.captureStream(30); // 30 FPS stream
-      const options = this.mimeInfo?.mime ? { mimeType: this.mimeInfo.mime } : undefined;
+      const bitrate = calculateTargetBitrate(this.width, this.height, 30);
+
+      const options = {
+        videoBitsPerSecond: bitrate,
+      };
+      if (this.mimeInfo?.mime) {
+        options.mimeType = this.mimeInfo.mime;
+      }
+
       this.mediaRecorder = new MediaRecorder(this.stream, options);
 
       this.chunks = [];
@@ -62,7 +71,7 @@ export class LiveSessionRecorder {
 
       this.mediaRecorder.start();
       this.isRecording = true;
-      this.startTime = Date.now();
+      this.startTime = performance.now();
 
       // Begin drawing loop
       const render = () => {
@@ -90,7 +99,7 @@ export class LiveSessionRecorder {
       ctx.fillStyle = '#0a0b0e';
       ctx.fillRect(0, 0, w, h);
 
-      // Draw camera video feed matching exact camera photo framing and aspect ratio
+      // Draw camera video feed matching exact camera photo framing
       if (this.videoEl && this.videoEl.videoWidth > 0 && this.videoEl.videoHeight > 0) {
         ctx.save();
         if (this.isMirrored) {
@@ -113,30 +122,25 @@ export class LiveSessionRecorder {
         }
       }
 
-      // -------------------------------------------------------------
-      // FLASH EFFECT
-      // -------------------------------------------------------------
+      // Flash effect
       if (this.isFlashing) {
         ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
         ctx.fillRect(0, 0, w, h);
       }
 
-      // -------------------------------------------------------------
-      // PHOTOBOOTH HUD OVERLAYS (Scale dynamically with resolution)
-      // -------------------------------------------------------------
-      const scaleFactor = Math.max(0.6, Math.min(1.8, w / 1280));
-      const elapsedSec = ((Date.now() - this.startTime) / 1000).toFixed(1);
+      // Overlays
+      const scaleFactor = Math.max(0.6, Math.min(2.0, w / 1080));
+      const elapsedSec = ((performance.now() - this.startTime) / 1000).toFixed(1);
 
-      // Top Left: Blinking Red REC Badge
+      // Blinking REC badge
       const isBlink = Math.floor(Date.now() / 500) % 2 === 0;
       const recDotX = 36 * scaleFactor;
       const recDotY = 38 * scaleFactor;
-      const recDotRadius = 7 * scaleFactor;
 
       if (isBlink) {
         ctx.fillStyle = '#ef4444';
         ctx.beginPath();
-        ctx.arc(recDotX, recDotY, recDotRadius, 0, Math.PI * 2);
+        ctx.arc(recDotX, recDotY, 7 * scaleFactor, 0, Math.PI * 2);
         ctx.fill();
       }
       ctx.fillStyle = '#ffffff';
@@ -145,7 +149,7 @@ export class LiveSessionRecorder {
       ctx.textBaseline = 'middle';
       ctx.fillText(`REC ${elapsedSec}s`, recDotX + 16 * scaleFactor, recDotY);
 
-      // Top Right: Shot counter badge
+      // Shot counter badge
       const badgeW = 120 * scaleFactor;
       const badgeH = 34 * scaleFactor;
       const badgeX = w - badgeW - 24 * scaleFactor;
@@ -165,7 +169,7 @@ export class LiveSessionRecorder {
       ctx.textAlign = 'center';
       ctx.fillText(`SHOT 0${this.currentShot}`, badgeX + badgeW / 2, badgeY + badgeH / 2);
 
-      // Center: Countdown Number or "Smile!"
+      // Countdown Number or "Smile!"
       if (this.countdown !== null && !this.isFlashing) {
         ctx.save();
         const text = String(this.countdown);
@@ -177,7 +181,6 @@ export class LiveSessionRecorder {
         const pillH = (isNum ? 140 : 80) * scaleFactor;
         const fontSz = (isNum ? 84 : 44) * scaleFactor;
 
-        // Dark glowing backing pill
         ctx.fillStyle = 'rgba(0, 0, 0, 0.55)';
         ctx.beginPath();
         if (typeof ctx.roundRect === 'function') {
@@ -218,14 +221,33 @@ export class LiveSessionRecorder {
           this.animId = null;
         }
 
-        this.mediaRecorder.onstop = () => {
+        this.mediaRecorder.onstop = async () => {
           try {
             const mime = this.mediaRecorder?.mimeType || this.mimeInfo?.mime || 'video/mp4';
             const blob = new Blob(this.chunks, { type: mime });
+            this.cleanupTracks();
+
+            // Post-recording verification
+            const meta = await verifyVideoBlob(blob).catch(() => ({
+              width: this.width,
+              height: this.height,
+              duration: (performance.now() - this.startTime) / 1000,
+            }));
+
             const url = URL.createObjectURL(blob);
             const ext = this.mimeInfo?.ext || 'mp4';
-            this.cleanupTracks();
-            resolve({ blob, url, ext, mimeType: mime });
+
+            resolve({
+              blob,
+              url,
+              ext,
+              mimeType: mime,
+              width: meta.width || this.width,
+              height: meta.height || this.height,
+              durationSec: meta.duration,
+              sizeBytes: blob.size,
+              captureType: 'live-recording',
+            });
           } catch (stopErr) {
             console.error('Error finalising live video recording:', stopErr);
             this.cleanupTracks();

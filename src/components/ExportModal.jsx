@@ -1,10 +1,10 @@
 import React, { useState, useEffect, useRef } from 'react';
 import confetti from 'canvas-confetti';
-import { renderPhotoStrip } from '../utils/canvasCompositor';
-import { createAnimatedGif } from '../utils/gifGenerator';
-import { createExportVideo } from '../utils/videoGenerator';
-import { FILTERS } from '../utils/filters';
-import { playCelebrationSound } from '../utils/audio';
+import { renderPhotoStrip } from '../utils/canvasCompositor.js';
+import { createAnimatedGif } from '../utils/gifGenerator.js';
+import { createExportVideo, VIDEO_RESOLUTIONS, verifyVideoBlob } from '../utils/videoGenerator.js';
+import { FILTERS } from '../utils/filters.js';
+import { playCelebrationSound } from '../utils/audio.js';
 import { 
   X, 
   Download, 
@@ -17,8 +17,38 @@ import {
   Wand2,
   Calendar,
   AlertCircle,
-  Printer
+  Printer,
+  Smartphone,
+  Eye,
+  RotateCw,
 } from 'lucide-react';
+
+/**
+ * Helper to determine if running on iOS or iPadOS (including iPad Pro desktop UA)
+ */
+const isIOSDevice = () => {
+  return (
+    typeof navigator !== 'undefined' &&
+    (/iPad|iPhone|iPod/.test(navigator.userAgent) ||
+      (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1))
+  );
+};
+
+/**
+ * Synchronously converts a base64 Data URL to a native File object.
+ * Critical for iPad Safari so navigator.share is invoked synchronously within user gesture!
+ */
+function dataUrlToFile(dataUrl, filename) {
+  const parts = dataUrl.split(',');
+  const mime = parts[0].match(/:(.*?);/)?.[1] || 'image/png';
+  const binary = atob(parts[1]);
+  const len = binary.length;
+  const buffer = new Uint8Array(len);
+  for (let i = 0; i < len; i++) {
+    buffer[i] = binary.charCodeAt(i);
+  }
+  return new File([buffer], filename, { type: mime });
+}
 
 export default function ExportModal({
   isOpen,
@@ -48,12 +78,19 @@ export default function ExportModal({
   const [gifProgress, setGifProgress] = useState(0);
   const [gifUrl, setGifUrl] = useState(null);
 
-  // Video state (defaults to live session video if recorded)
+  // Video state & configuration
+  const [videoSourceMode, setVideoSourceMode] = useState(sessionVideo ? 'live' : 'slideshow'); // 'live' | 'slideshow'
+  const [videoResolution, setVideoResolution] = useState('match-source');
   const [isGeneratingVideo, setIsGeneratingVideo] = useState(false);
   const [videoProgress, setVideoProgress] = useState(0);
   const [videoUrl, setVideoUrl] = useState(null);
   const [videoBlob, setVideoBlob] = useState(null);
   const [videoExt, setVideoExt] = useState('mp4');
+  const [videoMetadata, setVideoMetadata] = useState(null);
+
+  // iOS / iPad dedicated save sheet modal
+  const [showIosSaveModal, setShowIosSaveModal] = useState(false);
+  const [iosImageDataUrl, setIosImageDataUrl] = useState(null);
 
   const [statusMessage, setStatusMessage] = useState(null);
   const [errorMessage, setErrorMessage] = useState(null);
@@ -72,12 +109,29 @@ export default function ExportModal({
   // Sync live session video if provided by camera
   useEffect(() => {
     if (sessionVideo && sessionVideo.url) {
-      setVideoUrl(sessionVideo.url);
-      setVideoBlob(sessionVideo.blob);
-      setVideoExt(sessionVideo.ext || 'mp4');
-      activeVideoUrlRef.current = sessionVideo.url;
+      if (videoSourceMode === 'live') {
+        setVideoUrl(sessionVideo.url);
+        setVideoBlob(sessionVideo.blob);
+        setVideoExt(sessionVideo.ext || 'mp4');
+        activeVideoUrlRef.current = sessionVideo.url;
+
+        if (sessionVideo.blob) {
+          verifyVideoBlob(sessionVideo.blob)
+            .then((meta) => {
+              setVideoMetadata({
+                width: meta.width || sessionVideo.width || 1920,
+                height: meta.height || sessionVideo.height || 1080,
+                duration: meta.duration || 0,
+                sizeBytes: sessionVideo.blob.size,
+                mimeType: sessionVideo.blob.type,
+                type: 'Live Camera Recording (Countdown & Photos)',
+              });
+            })
+            .catch(() => {});
+        }
+      }
     }
-  }, [sessionVideo]);
+  }, [sessionVideo, videoSourceMode]);
 
   // Invalidate generated media when source photos or filter changes
   useEffect(() => {
@@ -185,60 +239,92 @@ export default function ExportModal({
     }
   }, [isOpen, activeTab, gifUrl, photos, filterId, filterIntensity, initialAdjustments]);
 
-  // Generate Video if not recorded during session
-  useEffect(() => {
-    if (isOpen && activeTab === 'video' && !videoUrl && photos.length > 0) {
-      let isCancelled = false;
-      const generateVideo = async () => {
-        setIsGeneratingVideo(true);
-        setVideoProgress(5);
-        setErrorMessage(null);
-        try {
-          const res = await createExportVideo({
-            photos,
-            filterId,
-            filterIntensity,
-            adjustments: initialAdjustments,
-            width: 720,
-            height: 960,
-            durationSec: 4,
-            onProgress: (p) => {
-              if (!isCancelled) setVideoProgress(p);
-            },
-          });
-          if (!isCancelled && res) {
-            setVideoUrl(res.url);
-            setVideoBlob(res.blob);
-            setVideoExt(res.ext || 'mp4');
-            activeVideoUrlRef.current = res.url;
-          }
-        } catch (err) {
-          console.error('Failed to create video safely:', err);
-          if (!isCancelled) {
-            setErrorMessage('Unable to encode video.');
-          }
-        } finally {
-          if (!isCancelled) setIsGeneratingVideo(false);
-        }
-      };
-      generateVideo();
-      return () => {
-        isCancelled = true;
-      };
-    }
-  }, [isOpen, activeTab, videoUrl, photos, filterId, filterIntensity, initialAdjustments]);
+  // Generate Slideshow Video with user-selected resolution
+  const handleGenerateSlideshowVideo = async (targetPreset = videoResolution) => {
+    if (!photos || photos.length === 0) return;
+    setIsGeneratingVideo(true);
+    setVideoProgress(5);
+    setErrorMessage(null);
+    try {
+      const res = await createExportVideo({
+        photos,
+        filterId,
+        filterIntensity,
+        adjustments: initialAdjustments,
+        resolutionPreset: targetPreset,
+        durationSec: 4,
+        onProgress: (p) => setVideoProgress(p),
+      });
 
-  // Helper to trigger safe file download across iOS Safari, iPadOS, Chrome, and Desktop
+      if (res) {
+        setVideoUrl(res.url);
+        setVideoBlob(res.blob);
+        setVideoExt(res.ext || 'mp4');
+        activeVideoUrlRef.current = res.url;
+        setVideoMetadata({
+          width: res.width,
+          height: res.height,
+          duration: res.durationSec,
+          sizeBytes: res.sizeBytes,
+          mimeType: res.mimeType,
+          type: 'Photo Slideshow Video',
+        });
+      }
+    } catch (err) {
+      console.error('Failed to create slideshow video safely:', err);
+      setErrorMessage('Unable to encode video.');
+    } finally {
+      setIsGeneratingVideo(false);
+    }
+  };
+
+  // Generate video when video tab is opened and no video is loaded
+  useEffect(() => {
+    if (isOpen && activeTab === 'video') {
+      if (videoSourceMode === 'live' && sessionVideo?.url) {
+        setVideoUrl(sessionVideo.url);
+        setVideoBlob(sessionVideo.blob);
+        setVideoExt(sessionVideo.ext || 'mp4');
+      } else if (!videoUrl && photos.length > 0) {
+        handleGenerateSlideshowVideo(videoResolution);
+      }
+    }
+  }, [isOpen, activeTab, videoSourceMode, sessionVideo]);
+
+  // Switch between Live Recording & Slideshow Video
+  const handleSelectVideoMode = (mode) => {
+    setVideoSourceMode(mode);
+    if (mode === 'live' && sessionVideo) {
+      setVideoUrl(sessionVideo.url);
+      setVideoBlob(sessionVideo.blob);
+      setVideoExt(sessionVideo.ext || 'mp4');
+      if (sessionVideo.blob) {
+        verifyVideoBlob(sessionVideo.blob)
+          .then((meta) => {
+            setVideoMetadata({
+              width: meta.width || sessionVideo.width || 1920,
+              height: meta.height || sessionVideo.height || 1080,
+              duration: meta.duration || 0,
+              sizeBytes: sessionVideo.blob.size,
+              mimeType: sessionVideo.blob.type,
+              type: 'Live Camera Recording (Countdown & Photos)',
+            });
+          })
+          .catch(() => {});
+      }
+    } else if (mode === 'slideshow') {
+      handleGenerateSlideshowVideo(videoResolution);
+    }
+  };
+
+  // Safe file downloader for desktop and fallback
   const downloadBlobOrShare = async (blob, filename, mimeType, successMsg) => {
     try {
       if (!blob) throw new Error('No data blob available to download');
 
-      const isIOS =
-        typeof navigator !== 'undefined' &&
-        (/iPad|iPhone|iPod/.test(navigator.userAgent) ||
-          (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1));
+      const isIOS = isIOSDevice();
 
-      // On iOS / iPadOS Safari, Web Share API with File object is the most reliable way to save to Camera Roll or Files
+      // On iOS Safari, Web Share API with File object
       if (isIOS && navigator.share && navigator.canShare) {
         try {
           const file = new File([blob], filename, { type: mimeType });
@@ -252,14 +338,11 @@ export default function ExportModal({
             return;
           }
         } catch (shareErr) {
-          if (shareErr.name === 'AbortError') {
-            return; // User canceled the share sheet
-          }
-          console.warn('Native share failed or declined, falling back to direct blob anchor:', shareErr);
+          if (shareErr.name === 'AbortError') return;
         }
       }
 
-      // Standard desktop & mobile fallback via object URL
+      // Standard desktop fallback via object URL
       const blobUrl = URL.createObjectURL(blob);
       const link = document.createElement('a');
       link.style.display = 'none';
@@ -268,52 +351,69 @@ export default function ExportModal({
       document.body.appendChild(link);
       link.click();
 
-      // Clean up
+      // Clean up after 60 seconds (never premature revoke on iOS)
       setTimeout(() => {
         try {
           document.body.removeChild(link);
           URL.revokeObjectURL(blobUrl);
         } catch (cleanErr) {}
-      }, 2000);
+      }, 60000);
 
       setStatusMessage(successMsg || 'Downloaded successfully!');
       setTimeout(() => setStatusMessage(null), 2500);
     } catch (err) {
       console.error('downloadBlobOrShare error:', err);
-      try {
-        const blobUrl = URL.createObjectURL(blob);
-        window.open(blobUrl, '_blank');
-      } catch (e) {
-        setErrorMessage('Could not export file. Please try again.');
-        setTimeout(() => setErrorMessage(null), 3000);
-      }
+      setErrorMessage('Could not export file.');
+      setTimeout(() => setErrorMessage(null), 3000);
     }
   };
 
-  // Download High-Res PNG
-  const handleDownloadPng = () => {
+  // ============================================================
+  // HIGH-RES PNG DOWNLOAD (WITH IPAD / SAFARI BULLETPROOF FIX)
+  // ============================================================
+  const handleDownloadPng = async () => {
     try {
       const canvas = canvasRef.current;
       if (!canvas) {
         setErrorMessage('Canvas is not ready for download.');
         return;
       }
-      canvas.toBlob(
-        async (blob) => {
-          if (!blob) {
-            setErrorMessage('Could not generate PNG data.');
+
+      // Synchronously generate high-resolution PNG data URL
+      const dataUrl = canvas.toDataURL('image/png', 1.0);
+      const filename = `retrobooth-strip-${Date.now()}.png`;
+
+      // Synchronously create native File object
+      const file = dataUrlToFile(dataUrl, filename);
+
+      if (isIOSDevice()) {
+        // In iOS Safari, invoke native Share Sheet synchronously:
+        // This opens the native iOS Share Sheet immediately allowing 1-tap "Save Image" straight into Photos!
+        if (navigator.share && navigator.canShare && navigator.canShare({ files: [file] })) {
+          try {
+            await navigator.share({
+              files: [file],
+              title: 'RetroBooth Photostrip',
+            });
+            setStatusMessage('Saved to Photos / Shared successfully!');
+            setTimeout(() => setStatusMessage(null), 3000);
             return;
+          } catch (shareErr) {
+            if (shareErr.name === 'AbortError') return; // User closed sheet
+            console.warn('Native share sheet error, showing iPad save dialog:', shareErr);
           }
-          await downloadBlobOrShare(
-            blob,
-            `retrobooth-strip-${Date.now()}.png`,
-            'image/png',
-            'PNG downloaded successfully!'
-          );
-        },
-        'image/png',
-        1.0
-      );
+        }
+
+        // If Web Share is cancelled, not allowed, or on iPadOS fallback:
+        // Display dedicated iPad Save Sheet with direct image so user can long-press "Save to Photos"!
+        setIosImageDataUrl(dataUrl);
+        setShowIosSaveModal(true);
+        return;
+      }
+
+      // Desktop / Android: Seamless direct download
+      const blob = new Blob([file], { type: 'image/png' });
+      await downloadBlobOrShare(blob, filename, 'image/png', 'PNG downloaded successfully!');
     } catch (err) {
       console.error('Download PNG caught error:', err);
       setErrorMessage('Could not export PNG. Please try again.');
@@ -322,58 +422,59 @@ export default function ExportModal({
   };
 
   // Download JPG
-  const handleDownloadJpg = () => {
+  const handleDownloadJpg = async () => {
     try {
       const canvas = canvasRef.current;
-      if (!canvas) {
-        setErrorMessage('Canvas is not ready for download.');
+      if (!canvas) return;
+      const dataUrl = canvas.toDataURL('image/jpeg', 0.96);
+      const filename = `retrobooth-strip-${Date.now()}.jpg`;
+      const file = dataUrlToFile(dataUrl, filename);
+
+      if (isIOSDevice()) {
+        if (navigator.share && navigator.canShare && navigator.canShare({ files: [file] })) {
+          try {
+            await navigator.share({ files: [file], title: 'RetroBooth Strip' });
+            setStatusMessage('Saved to Photos / Shared successfully!');
+            setTimeout(() => setStatusMessage(null), 3000);
+            return;
+          } catch (e) {
+            if (e.name === 'AbortError') return;
+          }
+        }
+        setIosImageDataUrl(dataUrl);
+        setShowIosSaveModal(true);
         return;
       }
-      canvas.toBlob(
-        async (blob) => {
-          if (!blob) {
-            setErrorMessage('Could not generate JPG data.');
-            return;
-          }
-          await downloadBlobOrShare(
-            blob,
-            `retrobooth-strip-${Date.now()}.jpg`,
-            'image/jpeg',
-            'JPG downloaded successfully!'
-          );
-        },
-        'image/jpeg',
-        0.95
-      );
+
+      const blob = new Blob([file], { type: 'image/jpeg' });
+      await downloadBlobOrShare(blob, filename, 'image/jpeg', 'JPG downloaded successfully!');
     } catch (err) {
       console.error('Download JPG caught error:', err);
-      setErrorMessage('Could not export JPG. Please try again.');
+      setErrorMessage('Could not export JPG.');
       setTimeout(() => setErrorMessage(null), 3000);
     }
   };
 
   // Download WebP
-  const handleDownloadWebp = () => {
+  const handleDownloadWebp = async () => {
     try {
       const canvas = canvasRef.current;
       if (!canvas) return;
-      canvas.toBlob(
-        async (blob) => {
-          if (!blob) {
-            setErrorMessage('WebP not supported, fallback to JPG.');
-            handleDownloadJpg();
-            return;
-          }
-          await downloadBlobOrShare(
-            blob,
-            `retrobooth-strip-${Date.now()}.webp`,
-            'image/webp',
-            'WebP downloaded successfully!'
-          );
-        },
-        'image/webp',
-        0.92
-      );
+      const dataUrl = canvas.toDataURL('image/webp', 0.92);
+      if (!dataUrl.startsWith('data:image/webp')) {
+        return handleDownloadJpg();
+      }
+      const filename = `retrobooth-strip-${Date.now()}.webp`;
+      const file = dataUrlToFile(dataUrl, filename);
+
+      if (isIOSDevice()) {
+        setIosImageDataUrl(dataUrl);
+        setShowIosSaveModal(true);
+        return;
+      }
+
+      const blob = new Blob([file], { type: 'image/webp' });
+      await downloadBlobOrShare(blob, filename, 'image/webp', 'WebP downloaded successfully!');
     } catch (e) {
       handleDownloadJpg();
     }
@@ -386,7 +487,7 @@ export default function ExportModal({
         setErrorMessage('Video is still processing, please wait a moment.');
         return;
       }
-      const filename = `retrobooth-live-video-${Date.now()}.${videoExt}`;
+      const filename = `retrobooth-${videoSourceMode === 'live' ? 'live-video' : 'slideshow'}-${Date.now()}.${videoExt}`;
       const mimeType = videoBlob?.type || (videoExt === 'mp4' ? 'video/mp4' : 'video/webm');
 
       if (videoBlob) {
@@ -394,14 +495,14 @@ export default function ExportModal({
           videoBlob,
           filename,
           mimeType,
-          `Live Video (${videoExt.toUpperCase()}) downloaded successfully!`
+          `Video (${videoExt.toUpperCase()}) downloaded successfully!`
         );
       } else {
         const link = document.createElement('a');
         link.download = filename;
         link.href = videoUrl;
         link.click();
-        setStatusMessage(`Live Video (${videoExt.toUpperCase()}) downloaded successfully!`);
+        setStatusMessage(`Video (${videoExt.toUpperCase()}) downloaded successfully!`);
         setTimeout(() => setStatusMessage(null), 2500);
       }
     } catch (err) {
@@ -428,17 +529,8 @@ export default function ExportModal({
       );
     } catch (err) {
       console.error('Download GIF caught error:', err);
-      try {
-        const link = document.createElement('a');
-        link.download = `retrobooth-animation-${Date.now()}.gif`;
-        link.href = gifUrl;
-        link.click();
-        setStatusMessage('GIF downloaded successfully!');
-        setTimeout(() => setStatusMessage(null), 2500);
-      } catch (e) {
-        setErrorMessage('Could not download GIF.');
-        setTimeout(() => setErrorMessage(null), 3000);
-      }
+      setErrorMessage('Could not download GIF.');
+      setTimeout(() => setErrorMessage(null), 3000);
     }
   };
 
@@ -457,8 +549,8 @@ export default function ExportModal({
         });
         if (navigator.canShare && navigator.canShare({ files: [file] })) {
           await navigator.share({
-            title: 'My 4-Cut Photobooth Live Video',
-            text: 'Live photobooth countdown & photo session! 🎬✨',
+            title: 'My RetroBooth Video',
+            text: 'Live photobooth recording! 🎬✨',
             files: [file],
           });
           return;
@@ -468,30 +560,25 @@ export default function ExportModal({
       const canvas = canvasRef.current;
       if (!canvas) return;
 
-      canvas.toBlob(async (blob) => {
-        try {
-          if (!blob) return;
-          const file = new File([blob], `retrobooth-${Date.now()}.png`, { type: 'image/png' });
-          if (navigator.canShare && navigator.canShare({ files: [file] })) {
-            await navigator.share({
-              title: 'My 4-Cut Photobooth Strip',
-              text: 'Taken at RetroBooth Studio! 📸✨',
-              files: [file],
-            });
-          } else {
-            await navigator.share({
-              title: 'My 4-Cut Photobooth Strip',
-              text: 'Taken at RetroBooth Studio! 📸✨',
-            });
-          }
-        } catch (shareErr) {
-          if (shareErr.name !== 'AbortError') {
-            console.warn('Web Share dialog dismissed or errored:', shareErr);
-          }
-        }
-      });
+      const dataUrl = canvas.toDataURL('image/png', 1.0);
+      const file = dataUrlToFile(dataUrl, `retrobooth-${Date.now()}.png`);
+
+      if (navigator.canShare && navigator.canShare({ files: [file] })) {
+        await navigator.share({
+          title: 'My 4-Cut Photobooth Strip',
+          text: 'Taken at RetroBooth Studio! 📸✨',
+          files: [file],
+        });
+      } else {
+        await navigator.share({
+          title: 'My 4-Cut Photobooth Strip',
+          text: 'Taken at RetroBooth Studio! 📸✨',
+        });
+      }
     } catch (err) {
-      console.warn('Web Share error:', err);
+      if (err.name !== 'AbortError') {
+        console.warn('Web Share error:', err);
+      }
     }
   };
 
@@ -548,7 +635,7 @@ export default function ExportModal({
         {/* ============================================================ */}
         <div className="relative flex-1 flex flex-col items-center justify-center p-4 bg-studio-950/70 border-b md:border-b-0 md:border-r border-white/5 min-h-0 overflow-hidden">
           
-          {/* Format Toggle Tabs: Strip vs Live Video vs GIF */}
+          {/* Format Toggle Tabs: Strip vs Video vs GIF */}
           <div className="flex items-center gap-1.5 p-1 bg-black/60 backdrop-blur-md rounded-2xl border border-white/10 mb-3 z-10">
             <button
               onClick={() => setActiveTab('strip')}
@@ -570,7 +657,7 @@ export default function ExportModal({
               }`}
             >
               <Video className="w-3.5 h-3.5 text-accent-cyan" />
-              <span>Live Video (MP4)</span>
+              <span>Video ({videoExt.toUpperCase()})</span>
             </button>
             <button
               onClick={() => setActiveTab('gif')}
@@ -586,7 +673,7 @@ export default function ExportModal({
           </div>
 
           {/* PREVIEW CONTAINER */}
-          <div className="relative flex-1 w-full flex items-center justify-center min-h-0 overflow-hidden">
+          <div className="relative flex-1 w-full flex flex-col items-center justify-center min-h-0 overflow-hidden">
             {activeTab === 'strip' ? (
               <div className="relative h-full aspect-[1/2.83] rounded-2xl overflow-hidden shadow-[0_20px_50px_rgba(0,0,0,0.8)] border border-white/20">
                 <canvas
@@ -595,27 +682,42 @@ export default function ExportModal({
                 />
               </div>
             ) : activeTab === 'video' ? (
-              <div className="relative w-full max-w-sm aspect-[3/4] rounded-2xl overflow-hidden shadow-2xl border border-white/20 bg-black flex items-center justify-center">
-                {isGeneratingVideo ? (
-                  <div className="flex flex-col items-center gap-3">
-                    <div className="w-10 h-10 border-4 border-accent-cyan/30 border-t-accent-cyan rounded-full animate-spin" />
-                    <p className="text-xs font-semibold text-slate-300">
-                      Processing Live Video... {videoProgress}%
-                    </p>
+              <div className="relative flex-1 w-full max-w-sm flex flex-col items-center justify-center min-h-0">
+                <div className="relative w-full aspect-[3/4] max-h-[70vh] rounded-2xl overflow-hidden shadow-2xl border border-white/20 bg-black flex items-center justify-center">
+                  {isGeneratingVideo ? (
+                    <div className="flex flex-col items-center gap-3">
+                      <div className="w-10 h-10 border-4 border-accent-cyan/30 border-t-accent-cyan rounded-full animate-spin" />
+                      <p className="text-xs font-semibold text-slate-300">
+                        Encoding Video... {videoProgress}%
+                      </p>
+                    </div>
+                  ) : videoUrl ? (
+                    <video
+                      ref={videoElemRef}
+                      src={videoUrl}
+                      controls
+                      autoPlay
+                      loop
+                      playsInline
+                      muted
+                      className="w-full h-full object-contain"
+                    />
+                  ) : (
+                    <p className="text-xs text-slate-400">Ready to play video</p>
+                  )}
+                </div>
+
+                {/* Video Metadata Verification Card */}
+                {videoMetadata && (
+                  <div className="mt-2 px-3 py-1 bg-white/5 border border-white/10 rounded-full flex items-center gap-2 text-[10px] text-slate-300">
+                    <span className="font-mono text-emerald-400 font-bold">{videoMetadata.width}×{videoMetadata.height}</span>
+                    <span>•</span>
+                    <span>{videoMetadata.duration ? `${videoMetadata.duration.toFixed(1)}s` : '4.0s'}</span>
+                    <span>•</span>
+                    <span>{(videoMetadata.sizeBytes / (1024 * 1024)).toFixed(1)} MB</span>
+                    <span>•</span>
+                    <span className="uppercase text-accent-cyan font-bold">{videoExt}</span>
                   </div>
-                ) : videoUrl ? (
-                  <video
-                    ref={videoElemRef}
-                    src={videoUrl}
-                    controls
-                    autoPlay
-                    loop
-                    playsInline
-                    muted
-                    className="w-full h-full object-contain"
-                  />
-                ) : (
-                  <p className="text-xs text-slate-400">Ready to play video</p>
                 )}
               </div>
             ) : (
@@ -655,10 +757,80 @@ export default function ExportModal({
               <h2 className="text-xl font-extrabold text-white">Save & Download</h2>
               <p className="text-xs text-slate-400 mt-0.5">
                 {activeTab === 'video'
-                  ? 'Real live video recording from countdown to photos taken!'
+                  ? 'Real camera recording & resolution-matched video export.'
                   : 'Export in full resolution image, video, or looping GIF.'}
               </p>
             </div>
+
+            {/* If on Video Tab: Video Configuration Controls */}
+            {activeTab === 'video' && (
+              <div className="flex flex-col gap-3 p-3 bg-studio-950/80 rounded-2xl border border-white/10">
+                {/* Source Selection: Live Session vs Slideshow */}
+                {sessionVideo && (
+                  <div>
+                    <span className="text-[10px] font-bold uppercase tracking-wider text-rose-400 block mb-1.5">
+                      Video Source
+                    </span>
+                    <div className="grid grid-cols-2 gap-1.5">
+                      <button
+                        onClick={() => handleSelectVideoMode('live')}
+                        className={`py-1.5 px-2 rounded-xl text-xs font-bold transition-all ${
+                          videoSourceMode === 'live'
+                            ? 'bg-rose-500 text-white shadow-sm'
+                            : 'bg-white/5 text-slate-300 hover:bg-white/10'
+                        }`}
+                      >
+                        Live Recording
+                      </button>
+                      <button
+                        onClick={() => handleSelectVideoMode('slideshow')}
+                        className={`py-1.5 px-2 rounded-xl text-xs font-bold transition-all ${
+                          videoSourceMode === 'slideshow'
+                            ? 'bg-rose-500 text-white shadow-sm'
+                            : 'bg-white/5 text-slate-300 hover:bg-white/10'
+                        }`}
+                      >
+                        Photo Slideshow
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {/* Resolution Selector for Slideshow Video */}
+                {videoSourceMode === 'slideshow' && (
+                  <div>
+                    <span className="text-[10px] font-bold uppercase tracking-wider text-accent-cyan block mb-1.5">
+                      Video Resolution
+                    </span>
+                    <div className="flex flex-col gap-1.5">
+                      <select
+                        value={videoResolution}
+                        onChange={(e) => {
+                          const val = e.target.value;
+                          setVideoResolution(val);
+                          handleGenerateSlideshowVideo(val);
+                        }}
+                        className="w-full bg-studio-900 border border-white/15 text-slate-200 text-xs px-2.5 py-1.5 rounded-xl outline-none"
+                      >
+                        <option value="match-source">Match Photos (Camera Resolution)</option>
+                        <option value="fhd-portrait">Portrait FHD (1080×1920) 9:16</option>
+                        <option value="fhd-landscape">Full HD (1920×1080) 16:9</option>
+                        <option value="square">Square (1080×1080) 1:1</option>
+                        <option value="hd-landscape">HD (1280×720) 16:9</option>
+                      </select>
+                      <button
+                        onClick={() => handleGenerateSlideshowVideo(videoResolution)}
+                        disabled={isGeneratingVideo}
+                        className="w-full py-1.5 bg-white/10 hover:bg-white/15 text-slate-200 rounded-xl text-[11px] font-bold flex items-center justify-center gap-1.5 active:scale-95 transition-all"
+                      >
+                        <RotateCw className={`w-3 h-3 text-accent-amber ${isGeneratingVideo ? 'animate-spin' : ''}`} />
+                        <span>Regenerate Slideshow</span>
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
 
             {/* Custom Text / Event Tag Input */}
             <div className="flex flex-col gap-1.5">
@@ -766,7 +938,7 @@ export default function ExportModal({
                   className="w-full py-2.5 px-3 bg-studio-800 hover:bg-studio-700 text-slate-200 rounded-xl font-semibold text-xs flex items-center justify-center gap-2 border border-white/10 active:scale-[0.98]"
                 >
                   <Printer className="w-4 h-4 text-accent-amber" />
-                  <span>Print Studio (4x6" / A4 / 300 DPI)</span>
+                  <span>Print Studio (4×6" / A4 / 300 DPI)</span>
                 </button>
               </>
             ) : activeTab === 'video' ? (
@@ -780,7 +952,7 @@ export default function ExportModal({
                 }`}
               >
                 <Download className="w-4 h-4" />
-                <span>Download Live Video ({videoExt.toUpperCase()})</span>
+                <span>Download Video ({videoExt.toUpperCase()})</span>
               </button>
             ) : (
               <button
@@ -812,6 +984,73 @@ export default function ExportModal({
         </div>
 
       </div>
+
+      {/* ============================================================ */}
+      {/* IPAD / IOS BULLETPROOF SAVE SHEET MODAL */}
+      {/* ============================================================ */}
+      {showIosSaveModal && iosImageDataUrl && (
+        <div className="fixed inset-0 z-60 flex items-center justify-center p-4 bg-black/90 backdrop-blur-md animate-fade-in select-none">
+          <div className="relative w-full max-w-md bg-studio-900 border border-studio-700 rounded-3xl p-5 flex flex-col items-center gap-4 shadow-2xl">
+            <button
+              onClick={() => setShowIosSaveModal(false)}
+              className="absolute top-4 right-4 p-2 rounded-full bg-white/10 hover:bg-white/20 text-white transition-all"
+            >
+              <X className="w-4 h-4" />
+            </button>
+
+            <div className="flex items-center gap-2 text-rose-400">
+              <Smartphone className="w-5 h-5" />
+              <h3 className="text-sm font-extrabold text-white">Save Photo Strip to iPad / iPhone</h3>
+            </div>
+
+            <div className="p-2 bg-studio-950 rounded-2xl border border-white/10 max-h-[50vh] flex items-center justify-center overflow-hidden">
+              <img
+                src={iosImageDataUrl}
+                alt="Rendered Photo Strip"
+                className="max-h-[46vh] object-contain rounded-xl shadow-lg"
+              />
+            </div>
+
+            <div className="w-full bg-studio-800/80 p-3 rounded-2xl border border-white/10 text-center">
+              <p className="text-xs font-bold text-white mb-1">
+                📸 Tap & Hold the Strip Above
+              </p>
+              <p className="text-[11px] text-slate-300">
+                Press and hold the image, then select <strong className="text-emerald-400">"Save to Photos"</strong>.
+              </p>
+            </div>
+
+            <div className="w-full grid grid-cols-2 gap-2">
+              {typeof navigator !== 'undefined' && navigator.share && (
+                <button
+                  onClick={async () => {
+                    try {
+                      const file = dataUrlToFile(iosImageDataUrl, `retrobooth-${Date.now()}.png`);
+                      await navigator.share({
+                        files: [file],
+                        title: 'RetroBooth Strip',
+                      });
+                    } catch (e) {}
+                  }}
+                  className="py-2.5 px-3 bg-rose-500 hover:bg-rose-600 text-white rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 shadow-md active:scale-95 transition-all"
+                >
+                  <Share2 className="w-3.5 h-3.5" />
+                  <span>Share Sheet</span>
+                </button>
+              )}
+              <a
+                href={iosImageDataUrl}
+                download={`retrobooth-strip-${Date.now()}.png`}
+                className="py-2.5 px-3 bg-studio-800 hover:bg-studio-700 text-slate-200 border border-white/10 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 active:scale-95 transition-all text-center"
+              >
+                <Download className="w-3.5 h-3.5 text-accent-cyan" />
+                <span>Direct Save</span>
+              </a>
+            </div>
+          </div>
+        </div>
+      )}
+
     </div>
   );
 }

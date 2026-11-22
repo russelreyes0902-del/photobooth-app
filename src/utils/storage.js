@@ -1,17 +1,19 @@
 /**
  * Client-Side IndexedDB Storage Manager for RetroBooth Studio.
- * Safely persists high-resolution sessions, re-editable project states, and custom templates.
+ * Safely persists high-resolution sessions, binary photo blobs, re-editable project states,
+ * and custom templates with quota checking.
  */
 
 const DB_NAME = 'RetroBoothDB';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const STORE_PROJECTS = 'projects';
 const STORE_TEMPLATES = 'customTemplates';
+const STORE_MEDIA = 'mediaBlobs';
 
 function openDatabase() {
   return new Promise((resolve, reject) => {
     if (typeof window === 'undefined' || !window.indexedDB) {
-      reject(new Error('IndexedDB is not supported in this environment.'));
+      reject(new Error('IndexedDB is not supported in this browser environment.'));
       return;
     }
 
@@ -32,19 +34,80 @@ function openDatabase() {
         const templateStore = db.createObjectStore(STORE_TEMPLATES, { keyPath: 'id' });
         templateStore.createIndex('createdAt', 'createdAt', { unique: false });
       }
+
+      // Media Blobs Store for binary Blobs
+      if (!db.objectStoreNames.contains(STORE_MEDIA)) {
+        db.createObjectStore(STORE_MEDIA, { keyPath: 'id' });
+      }
     };
 
     request.onsuccess = (e) => resolve(e.target.result);
-    request.onerror = (e) => reject(e.target.error || new Error('Failed to open database'));
+    request.onerror = (e) => reject(e.target.error || new Error('Failed to open IndexedDB database.'));
   });
 }
 
 /**
- * Save or update a project session
+ * Save binary blob to media store
+ */
+export async function saveMediaBlob(id, blob) {
+  try {
+    if (!blob) return null;
+    const db = await openDatabase();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(STORE_MEDIA, 'readwrite');
+      const store = tx.objectStore(STORE_MEDIA);
+      const req = store.put({ id, blob, createdAt: Date.now() });
+      req.onsuccess = () => resolve(id);
+      req.onerror = () => reject(req.error);
+    });
+  } catch (err) {
+    console.warn('saveMediaBlob warning:', err);
+    return null;
+  }
+}
+
+/**
+ * Retrieve binary blob by ID
+ */
+export async function getMediaBlob(id) {
+  try {
+    const db = await openDatabase();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(STORE_MEDIA, 'readonly');
+      const store = tx.objectStore(STORE_MEDIA);
+      const req = store.get(id);
+      req.onsuccess = () => resolve(req.result?.blob || null);
+      req.onerror = () => reject(req.error);
+    });
+  } catch (err) {
+    console.warn('getMediaBlob warning:', err);
+    return null;
+  }
+}
+
+/**
+ * Save or update a project session with full reconstruction state
  */
 export async function saveProject(project) {
   try {
     const db = await openDatabase();
+
+    // Prepare photos: if photo has Blob, store blob directly
+    const serializedPhotos = (project.photos || []).map((photo, idx) => {
+      if (!photo) return null;
+      return {
+        id: photo.id || `photo_${Date.now()}_${idx}`,
+        slotIndex: photo.slotIndex ?? idx,
+        dataUrl: photo.dataUrl || null,
+        blob: photo.blob || null,
+        width: photo.width || 1920,
+        height: photo.height || 1080,
+        mimeType: photo.mimeType || 'image/jpeg',
+        captureMethod: photo.captureMethod || 'canvas-frame',
+        timestamp: photo.timestamp || Date.now(),
+      };
+    });
+
     return new Promise((resolve, reject) => {
       const tx = db.transaction(STORE_PROJECTS, 'readwrite');
       const store = tx.objectStore(STORE_PROJECTS);
@@ -56,14 +119,14 @@ export async function saveProject(project) {
         updatedAt: Date.now(),
         isFavorite: Boolean(project.isFavorite),
         thumbnailDataUrl: project.thumbnailDataUrl || null,
-        // Full design state to allow 100% reconstruction and re-editing
-        photos: project.photos || [],
-        captureCount: project.captureCount || 4,
+        // Full design state for 100% reconstruction and re-editing
+        photos: serializedPhotos,
+        captureCount: project.captureCount || serializedPhotos.length || 4,
         templateId: project.templateId || 'denim',
         customTemplate: project.customTemplate || null,
         paperColor: project.paperColor || '#ffffff',
         paperPattern: project.paperPattern || 'none',
-        filterId: project.filterId || 'normal',
+        filterId: project.filterId || 'clean-original',
         filterIntensity: project.filterIntensity ?? 100,
         adjustments: project.adjustments || {},
         photoTransforms: project.photoTransforms || {},
@@ -74,7 +137,13 @@ export async function saveProject(project) {
 
       const req = store.put(record);
       req.onsuccess = () => resolve(record);
-      req.onerror = (err) => reject(err);
+      req.onerror = () => {
+        if (req.error?.name === 'QuotaExceededError') {
+          reject(new Error('Storage quota exceeded. Please delete older projects to free up space.'));
+        } else {
+          reject(req.error || new Error('Failed to save project.'));
+        }
+      };
     });
   } catch (err) {
     console.error('saveProject caught error:', err);
@@ -83,7 +152,7 @@ export async function saveProject(project) {
 }
 
 /**
- * Retrieve all saved projects ordered by createdAt desc
+ * Retrieve all saved projects ordered by updatedAt desc
  */
 export async function getAllProjects() {
   try {
@@ -259,11 +328,11 @@ export async function deleteCustomTemplate(id) {
  */
 export async function getStorageEstimate() {
   try {
-    if (navigator.storage && navigator.storage.estimate) {
+    if (navigator?.storage?.estimate) {
       const estimate = await navigator.storage.estimate();
       return {
-        usageMb: estimate.usage ? (estimate.usage / (1024 * 1024)).toFixed(1) : 0,
-        quotaMb: estimate.quota ? (estimate.quota / (1024 * 1024)).toFixed(0) : 0,
+        usageMb: estimate.usage ? (estimate.usage / (1024 * 1024)).toFixed(1) : '0',
+        quotaMb: estimate.quota ? (estimate.quota / (1024 * 1024)).toFixed(0) : '0',
       };
     }
   } catch (e) {}
