@@ -1,6 +1,7 @@
 import React, { useRef, useState } from 'react';
-import { BUILTIN_TEMPLATES, PAPER_COLORS } from '../utils/templates';
-import { Sparkles, Upload, Check, AlertCircle } from 'lucide-react';
+import { BUILTIN_TEMPLATES, PAPER_COLORS, TEMPLATE_CATEGORIES } from '../utils/templates';
+import { Sparkles, Upload, Check, AlertCircle, Trash2 } from 'lucide-react';
+import { saveCustomTemplate, deleteCustomTemplate } from '../utils/storage';
 
 export default function TemplateSelector({
   selectedTemplateId,
@@ -9,59 +10,74 @@ export default function TemplateSelector({
   onSelectPaperColor,
   customTemplates = [],
   onAddCustomTemplate,
+  onDeleteCustomTemplate,
 }) {
   const fileInputRef = useRef(null);
   const [uploadError, setUploadError] = useState(null);
+  const [selectedCategory, setSelectedCategory] = useState('all');
 
-  const allTemplates = [...BUILTIN_TEMPLATES, ...customTemplates];
+  const allTemplates = [...customTemplates, ...BUILTIN_TEMPLATES];
 
-  const handleCustomUpload = (e) => {
+  const filteredTemplates = allTemplates.filter(t => {
+    if (selectedCategory === 'all') return true;
+    return t.category === selectedCategory;
+  });
+
+  const handleCustomUpload = async (e) => {
     setUploadError(null);
     try {
       const file = e.target.files?.[0];
       if (!file) return;
 
-      // Validate file type
       if (!file.type.startsWith('image/')) {
         setUploadError('Please select a valid image file (PNG, WEBP, JPG).');
         setTimeout(() => setUploadError(null), 3000);
         return;
       }
 
-      // Validate file size (max 25MB)
       if (file.size > 25 * 1024 * 1024) {
         setUploadError('Image size exceeds 25MB limit.');
         setTimeout(() => setUploadError(null), 3000);
         return;
       }
 
-      const url = URL.createObjectURL(file);
-      const newTemplate = {
-        id: `custom-${Date.now()}`,
-        name: file.name.replace(/\.[^/.]+$/, '').slice(0, 16),
-        subtitle: 'Custom User Frame',
-        src: url,
-        baseWidth: 707,
-        baseHeight: 2000,
-        exportWidth: 1200,
-        exportHeight: 3395,
-        tag: 'Custom',
-        accentColor: '#ec4899',
-        defaultPaper: '#ffffff',
-        cutouts: [
-          { x: 43, y: 71, width: 621, height: 373, radius: 10 },
-          { x: 43, y: 469, width: 621, height: 373, radius: 10 },
-          { x: 43, y: 866, width: 621, height: 374, radius: 10 },
-          { x: 43, y: 1264, width: 621, height: 374, radius: 10 },
-        ],
-      };
+      const reader = new FileReader();
+      reader.onload = async (event) => {
+        try {
+          const dataUrl = event.target.result;
+          const newTemplate = {
+            id: `custom_${Date.now()}`,
+            name: file.name.replace(/\.[^/.]+$/, '').slice(0, 16),
+            subtitle: 'Custom User Frame',
+            category: 'minimalist',
+            slotCount: 4,
+            layout: 'strip',
+            src: dataUrl,
+            baseWidth: 707,
+            baseHeight: 2000,
+            exportWidth: 1200,
+            exportHeight: 3395,
+            tag: 'Custom',
+            accentColor: '#ec4899',
+            defaultPaper: '#ffffff',
+            cutouts: [
+              { index: 0, x: 43, y: 71, width: 621, height: 373, radius: 10 },
+              { index: 1, x: 43, y: 469, width: 621, height: 373, radius: 10 },
+              { index: 2, x: 43, y: 866, width: 621, height: 374, radius: 10 },
+              { index: 3, x: 43, y: 1264, width: 621, height: 374, radius: 10 },
+            ],
+          };
 
-      if (onAddCustomTemplate) {
-        onAddCustomTemplate(newTemplate);
-      }
-      if (onSelectTemplate) {
-        onSelectTemplate(newTemplate.id);
-      }
+          // Save to IndexedDB
+          await saveCustomTemplate(newTemplate);
+
+          if (onAddCustomTemplate) onAddCustomTemplate(newTemplate);
+          if (onSelectTemplate) onSelectTemplate(newTemplate.id);
+        } catch (saveErr) {
+          console.warn('Failed to save custom template:', saveErr);
+        }
+      };
+      reader.readAsDataURL(file);
     } catch (err) {
       console.error('Safe handleCustomUpload error:', err);
       setUploadError('Failed to load image template.');
@@ -73,15 +89,26 @@ export default function TemplateSelector({
     }
   };
 
+  const handleDeleteCustom = async (templateId, e) => {
+    e.stopPropagation();
+    try {
+      await deleteCustomTemplate(templateId);
+      if (onDeleteCustomTemplate) onDeleteCustomTemplate(templateId);
+      if (selectedTemplateId === templateId) {
+        onSelectTemplate('denim');
+      }
+    } catch (e) {}
+  };
+
   return (
-    <div className="flex flex-col gap-3 p-3.5 bg-studio-900/90 backdrop-blur-md rounded-3xl border border-studio-700/60 shadow-xl">
+    <div className="flex flex-col gap-3 p-3.5 bg-studio-900/90 backdrop-blur-md rounded-3xl border border-studio-700/60 shadow-xl select-none">
       
       {/* Header */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
           <Sparkles className="w-4 h-4 text-accent-pink" />
           <h3 className="text-xs font-bold uppercase tracking-wider text-slate-200">
-            Select Frame Template
+            Frame Templates
           </h3>
         </div>
         <button
@@ -91,7 +118,7 @@ export default function TemplateSelector({
           className="flex items-center gap-1.5 px-2.5 py-1 text-xs font-semibold bg-white/5 hover:bg-white/10 text-slate-300 hover:text-white rounded-xl border border-white/10 transition-all active:scale-95"
         >
           <Upload className="w-3.5 h-3.5 text-accent-cyan" />
-          <span>Add Custom</span>
+          <span>Upload Frame</span>
         </button>
         <input
           ref={fileInputRef}
@@ -109,10 +136,29 @@ export default function TemplateSelector({
         </div>
       )}
 
+      {/* Category Pills */}
+      <div className="flex items-center gap-1 overflow-x-auto pb-1 scrollbar-none text-[11px]">
+        {TEMPLATE_CATEGORIES.map(cat => (
+          <button
+            key={cat.id}
+            onClick={() => setSelectedCategory(cat.id)}
+            className={`px-2.5 py-1 rounded-xl font-bold whitespace-nowrap transition-all ${
+              selectedCategory === cat.id
+                ? 'bg-rose-500 text-white shadow-sm'
+                : 'bg-white/5 text-slate-400 hover:text-slate-200 hover:bg-white/10'
+            }`}
+          >
+            {cat.name}
+          </button>
+        ))}
+      </div>
+
       {/* Horizontal Scroll of Templates */}
       <div className="flex items-center gap-2.5 overflow-x-auto pb-1.5 scrollbar-thin scrollbar-thumb-white/10 scrollbar-track-transparent">
-        {allTemplates.map((template) => {
+        {filteredTemplates.map((template) => {
           const isSelected = template.id === selectedTemplateId;
+          const isCustom = template.id.startsWith('custom');
+
           return (
             <button
               key={template.id}
@@ -130,13 +176,25 @@ export default function TemplateSelector({
                 <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded-full ${
                   isSelected ? 'bg-rose-500 text-white' : 'bg-white/10 text-slate-400'
                 }`}>
-                  {template.tag || 'Frame'}
+                  {template.slotCount ? `${template.slotCount}-Cut` : (template.tag || 'Frame')}
                 </span>
-                {isSelected && (
-                  <div className="w-4 h-4 rounded-full bg-rose-500 flex items-center justify-center text-white">
-                    <Check className="w-2.5 h-2.5 stroke-[3]" />
-                  </div>
-                )}
+                
+                <div className="flex items-center gap-1">
+                  {isCustom && (
+                    <button
+                      onClick={(e) => handleDeleteCustom(template.id, e)}
+                      title="Remove custom template"
+                      className="p-1 hover:text-rose-400 text-slate-400"
+                    >
+                      <Trash2 className="w-3 h-3" />
+                    </button>
+                  )}
+                  {isSelected && (
+                    <div className="w-4 h-4 rounded-full bg-rose-500 flex items-center justify-center text-white">
+                      <Check className="w-2.5 h-2.5 stroke-[3]" />
+                    </div>
+                  )}
+                </div>
               </div>
 
               {/* Template Thumbnail Representation */}

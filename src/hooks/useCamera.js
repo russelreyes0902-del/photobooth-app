@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { playCountdownBeep, playShutterSound } from '../utils/audio';
 import { LiveSessionRecorder } from '../utils/liveSessionRecorder';
+import { calculateViewfinderCrop } from '../utils/geometry';
 
 export function isMobileOrTabletDevice() {
   if (typeof window === 'undefined' || typeof navigator === 'undefined') return false;
@@ -14,6 +15,7 @@ export function isMobileOrTabletDevice() {
 export function useCamera() {
   const videoRef = useRef(null);
   const streamRef = useRef(null);
+  const cameraRequestIdRef = useRef(0);
 
   const [stream, setStream] = useState(null);
   const [devices, setDevices] = useState([]);
@@ -29,18 +31,23 @@ export function useCamera() {
   const [permissionError, setPermissionError] = useState(null);
   const [isHttpsNeeded, setIsHttpsNeeded] = useState(false);
 
-  // Burst capture state
+  // Configurable photoshoot setup
+  const [captureCount, setCaptureCount] = useState(4); // 1, 2, 3, 4, 6
+  const [captureMode, setCaptureMode] = useState('auto'); // 'auto' | 'manual'
+  const [countdownDelay, setCountdownDelay] = useState(3); // 0, 3, 5, 10 seconds
+
+  // Active capture runtime state
   const [isCapturingBurst, setIsCapturingBurst] = useState(false);
-  const [burstProgress, setBurstProgress] = useState(0); // 0 to 4
-  const [countdown, setCountdown] = useState(null); // 3, 2, 1, null
+  const [activeShotIndex, setActiveShotIndex] = useState(0); // currently taking shot index
+  const [burstProgress, setBurstProgress] = useState(0);
+  const [countdown, setCountdown] = useState(null); // 3, 2, 1, 'Smile!', null
   const [isFlashing, setIsFlashing] = useState(false);
-  const [countdownDelay, setCountdownDelay] = useState(3); // 3s or 5s delay
 
   const isMobileOrTablet = isMobileOrTabletDevice();
 
   // Single source of truth for lens optical crop scale:
   // On iPad / tablet front camera:
-  // - 1x mode: 1.38x portrait crop (matches native Camera app 1x mode)
+  // - 1x mode: 1.38x portrait crop (matches native iPad Camera app 1x mode)
   // - 0.5x mode: 1.0x uncropped full 122° wide-angle
   // On laptop / desktop single-lens webcams: strictly 1.0x
   const lensZoomScale = (isMobileOrTablet && lensMode === '1x') ? 1.38 : 1.0;
@@ -116,8 +123,9 @@ export function useCamera() {
     }
   }, []);
 
-  // Start or restart video stream
+  // Start or restart video stream safely without race conditions
   const startCamera = useCallback(async () => {
+    const requestId = ++cameraRequestIdRef.current;
     setIsLoading(true);
     setPermissionError(null);
     setIsHttpsNeeded(false);
@@ -128,17 +136,18 @@ export function useCamera() {
       const isSecure = window.isSecureContext || isLocalhost || window.location.protocol === 'https:';
 
       if (!isSecure || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        if (requestId !== cameraRequestIdRef.current) return;
         setHasPermission(false);
         setIsLoading(false);
         setIsHttpsNeeded(true);
         setPermissionError(
-          'Safari & iPadOS block camera access over plain HTTP network addresses. Please open the secure HTTPS URL on your iPad.'
+          'Safari & iPadOS block camera access over plain HTTP network addresses. Please open the secure HTTPS URL.'
         );
         return;
       }
     }
 
-    // Safely stop existing stream tracks
+    // Safely stop existing stream tracks before opening a new one
     try {
       if (streamRef.current) {
         streamRef.current.getTracks().forEach(track => {
@@ -185,6 +194,7 @@ export function useCamera() {
             video: true,
           });
         } catch (err3) {
+          if (requestId !== cameraRequestIdRef.current) return;
           console.error('All camera initialization attempts failed:', err3);
           setHasPermission(false);
           if (err3.name === 'NotAllowedError') {
@@ -200,6 +210,14 @@ export function useCamera() {
           return;
         }
       }
+    }
+
+    // Check if this request is still the newest one
+    if (requestId !== cameraRequestIdRef.current) {
+      if (newStream) {
+        newStream.getTracks().forEach(t => { try { t.stop(); } catch (e) {} });
+      }
+      return;
     }
 
     try {
@@ -282,7 +300,7 @@ export function useCamera() {
   }, []);
 
   // Single frame grab from video element with 100% viewfinder-matched crop
-  const grabFrame = useCallback(() => {
+  const grabFrame = useCallback((slotIndex = 0) => {
     try {
       const video = videoRef.current;
       if (!video) return null;
@@ -304,33 +322,76 @@ export function useCamera() {
       }
 
       // Exact crop matching what the user sees in the viewfinder:
-      // When lensZoomScale > 1.0 (1x mode on iPad/tablet), crop by lensZoomScale
-      // When 0.5x mode, capture the full uncropped frame!
-      if (lensZoomScale > 1.0) {
-        const sw = vw / lensZoomScale;
-        const sh = vh / lensZoomScale;
-        const sx = (vw - sw) / 2;
-        const sy = (vh - sh) / 2;
-        ctx.drawImage(video, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
-      } else {
-        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-      }
-
+      const crop = calculateViewfinderCrop(vw, vh, lensZoomScale);
+      ctx.drawImage(video, crop.sx, crop.sy, crop.sw, crop.sh, 0, 0, canvas.width, canvas.height);
       ctx.restore();
 
       const dataUrl = canvas.toDataURL('image/jpeg', 0.95);
-      return { dataUrl, width: canvas.width, height: canvas.height };
+      return {
+        id: `photo_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+        slotIndex,
+        dataUrl,
+        width: canvas.width,
+        height: canvas.height,
+        timestamp: Date.now(),
+      };
     } catch (err) {
       console.error('Safe grabFrame caught error:', err);
       return null;
     }
   }, [isMirrored, lensZoomScale]);
 
+  // Run a single countdown and capture snap
+  const captureOneShotWithCountdown = useCallback(async (slotIndex, delaySec) => {
+    const delay = Math.max(0, delaySec ?? countdownDelay ?? 3);
+
+    if (delay > 0) {
+      for (let c = delay; c > 0; c--) {
+        setCountdown(c);
+        try { playCountdownBeep(false); } catch (e) {}
+        await new Promise(r => setTimeout(r, 950));
+      }
+
+      setCountdown('Smile!');
+      try { playCountdownBeep(true); } catch (e) {}
+      await new Promise(r => setTimeout(r, 350));
+    }
+
+    // Flash & Shutter
+    setIsFlashing(true);
+    try { playShutterSound(); } catch (e) {}
+
+    const frame = grabFrame(slotIndex);
+
+    setTimeout(() => {
+      setIsFlashing(false);
+    }, 220);
+
+    setCountdown(null);
+    return frame;
+  }, [countdownDelay, grabFrame]);
+
+  // Retake a single photo slot without losing other shots
+  const retakeSingleShot = useCallback(async (slotIndex) => {
+    if (isCapturingBurst) return null;
+    setIsCapturingBurst(true);
+    setActiveShotIndex(slotIndex);
+    try {
+      const photo = await captureOneShotWithCountdown(slotIndex, countdownDelay);
+      return photo;
+    } finally {
+      setIsCapturingBurst(false);
+      setCountdown(null);
+      setIsFlashing(false);
+    }
+  }, [isCapturingBurst, countdownDelay, captureOneShotWithCountdown]);
+
   // Burst capture sequence with LIVE video recording during the entire shoot
-  const startBurstCapture = useCallback(async (onPhotoCaptured, onComplete, activeFilterObj = null) => {
+  const startBurstCapture = useCallback(async (onPhotoCaptured, onComplete, activeFilterObj = null, totalShotsParam = null) => {
     if (isCapturingBurst) return;
 
     let liveRecorder = null;
+    const totalShots = totalShotsParam || captureCount || 4;
 
     try {
       setIsCapturingBurst(true);
@@ -352,9 +413,9 @@ export function useCamera() {
       }
 
       const capturedPhotos = [];
-      const totalShots = 4;
 
       for (let shot = 0; shot < totalShots; shot++) {
+        setActiveShotIndex(shot);
         setBurstProgress(shot);
 
         // Update recorder with current shot
@@ -370,47 +431,38 @@ export function useCamera() {
         }
 
         // Countdown delay loop
-        const delay = Math.max(1, countdownDelay || 3);
-        for (let c = delay; c > 0; c--) {
-          setCountdown(c);
-          if (liveRecorder) {
-            liveRecorder.updateState({ countdown: c, isFlashing: false });
+        const delay = Math.max(0, countdownDelay ?? 3);
+        if (delay > 0) {
+          for (let c = delay; c > 0; c--) {
+            setCountdown(c);
+            if (liveRecorder) {
+              liveRecorder.updateState({ countdown: c, isFlashing: false });
+            }
+            try { playCountdownBeep(false); } catch (e) {}
+            await new Promise(r => setTimeout(r, 950));
           }
-          try {
-            playCountdownBeep(false);
-          } catch (e) {}
-          await new Promise(r => setTimeout(r, 950));
-        }
 
-        // Final smile cue
-        setCountdown('Smile!');
-        if (liveRecorder) {
-          liveRecorder.updateState({ countdown: 'Smile!', isFlashing: false });
+          setCountdown('Smile!');
+          if (liveRecorder) {
+            liveRecorder.updateState({ countdown: 'Smile!', isFlashing: false });
+          }
+          try { playCountdownBeep(true); } catch (e) {}
+          await new Promise(r => setTimeout(r, 350));
         }
-        try {
-          playCountdownBeep(true);
-        } catch (e) {}
-        await new Promise(r => setTimeout(r, 300));
 
         // Screen flash & shutter sound
         setIsFlashing(true);
         if (liveRecorder) {
           liveRecorder.updateState({ isFlashing: true, countdown: null });
         }
-        try {
-          playShutterSound();
-        } catch (e) {}
+        try { playShutterSound(); } catch (e) {}
 
         // Capture frame safely
-        const frame = grabFrame();
+        const frame = grabFrame(shot);
         if (frame) {
           capturedPhotos.push(frame);
           if (onPhotoCaptured) {
-            try {
-              onPhotoCaptured(frame, shot);
-            } catch (cbErr) {
-              console.warn('onPhotoCaptured callback warning:', cbErr);
-            }
+            try { onPhotoCaptured(frame, shot); } catch (cbErr) {}
           }
         }
 
@@ -420,13 +472,13 @@ export function useCamera() {
           if (liveRecorder) {
             liveRecorder.updateState({ isFlashing: false });
           }
-        }, 250);
+        }, 220);
 
         setCountdown(null);
 
         // Inter-shot breather
         if (shot < totalShots - 1) {
-          await new Promise(r => setTimeout(r, 850));
+          await new Promise(r => setTimeout(r, 800));
         }
       }
 
@@ -457,7 +509,7 @@ export function useCamera() {
       setCountdown(null);
       setIsFlashing(false);
     }
-  }, [isCapturingBurst, countdownDelay, grabFrame, isMirrored, lensZoomScale]);
+  }, [isCapturingBurst, captureCount, countdownDelay, grabFrame, isMirrored, lensZoomScale]);
 
   return {
     videoRef,
@@ -480,14 +532,21 @@ export function useCamera() {
     permissionError,
     isHttpsNeeded,
     retryCamera: startCamera,
-    // Burst capture
+    // Photoshoot Configuration
+    captureCount,
+    setCaptureCount,
+    captureMode,
+    setCaptureMode,
+    countdownDelay,
+    setCountdownDelay,
+    // Burst & Retake
     isCapturingBurst,
+    activeShotIndex,
     burstProgress,
     countdown,
     isFlashing,
-    countdownDelay,
-    setCountdownDelay,
     startBurstCapture,
+    retakeSingleShot,
     grabFrame,
   };
 }

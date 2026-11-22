@@ -1,4 +1,6 @@
-import { getFilterById } from './filters';
+import { buildComposedFilterString, getInterpolatedTintColor } from './filters.js';
+import { calculateCoverCrop } from './geometry.js';
+import { getStickerById, loadStickerImage } from './stickers.js';
 
 // In-memory cache for loaded template images to avoid repeated network fetches
 const imageCache = new Map();
@@ -41,75 +43,87 @@ export function loadTemplateImage(src) {
 }
 
 /**
- * Draws an image with 'cover' object-fit inside destination rectangle with rounded corners
+ * Draws background pattern on canvas
  */
-function drawImageCover(ctx, img, dx, dy, dw, dh, radius = 0) {
+function drawBackgroundPattern(ctx, pattern, width, height) {
+  if (!pattern || pattern === 'none') return;
+  ctx.save();
   try {
-    if (!ctx || !img) return;
-
-    const imgW = img.width || img.videoWidth || 0;
-    const imgH = img.height || img.videoHeight || 0;
-    if (imgW <= 0 || imgH <= 0 || dw <= 0 || dh <= 0) return;
-
-    const targetRatio = dw / dh;
-    const imgRatio = imgW / imgH;
-
-    let sx, sy, sw, sh;
-    if (imgRatio > targetRatio) {
-      sh = imgH;
-      sw = imgH * targetRatio;
-      sx = (imgW - sw) / 2;
-      sy = 0;
-    } else {
-      sw = imgW;
-      sh = imgW / targetRatio;
-      sx = 0;
-      sy = (imgH - sh) / 2;
-    }
-
-    ctx.save();
-    try {
-      ctx.beginPath();
-      if (radius > 0 && typeof ctx.roundRect === 'function') {
-        ctx.roundRect(dx, dy, dw, dh, radius);
-      } else if (radius > 0) {
-        const r = radius;
-        ctx.moveTo(dx + r, dy);
-        ctx.lineTo(dx + dw - r, dy);
-        ctx.quadraticCurveTo(dx + dw, dy, dx + dw, dy + r);
-        ctx.lineTo(dx + dw, dy + dh - r);
-        ctx.quadraticCurveTo(dx + dw, dy + dh, dx + dw - r, dy + dh);
-        ctx.lineTo(dx + r, dy + dh);
-        ctx.quadraticCurveTo(dx, dy + dh, dx, dy + dh - r);
-        ctx.lineTo(dx, dy + r);
-        ctx.quadraticCurveTo(dx, dy, dx + r, dy);
-      } else {
-        ctx.rect(dx, dy, dw, dh);
+    if (pattern === 'dots') {
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.04)';
+      const step = 28;
+      for (let y = step / 2; y < height; y += step) {
+        for (let x = step / 2; x < width; x += step) {
+          ctx.beginPath();
+          ctx.arc(x, y, 2.5, 0, Math.PI * 2);
+          ctx.fill();
+        }
       }
-      ctx.closePath();
-      ctx.clip();
-
-      ctx.drawImage(img, sx, sy, sw, sh, dx, dy, dw, dh);
-    } finally {
-      ctx.restore();
+    } else if (pattern === 'grid') {
+      ctx.strokeStyle = 'rgba(0, 0, 0, 0.035)';
+      ctx.lineWidth = 1.5;
+      const step = 36;
+      ctx.beginPath();
+      for (let x = 0; x < width; x += step) {
+        ctx.moveTo(x, 0);
+        ctx.lineTo(x, height);
+      }
+      for (let y = 0; y < height; y += step) {
+        ctx.moveTo(0, y);
+        ctx.lineTo(width, y);
+      }
+      ctx.stroke();
+    } else if (pattern === 'stripes') {
+      ctx.strokeStyle = 'rgba(0, 0, 0, 0.03)';
+      ctx.lineWidth = 4;
+      const step = 24;
+      ctx.beginPath();
+      for (let x = -height; x < width + height; x += step) {
+        ctx.moveTo(x, 0);
+        ctx.lineTo(x + height, height);
+      }
+      ctx.stroke();
+    } else if (pattern === 'grain') {
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.025)';
+      for (let y = 0; y < height; y += 10) {
+        for (let x = 0; x < width; x += 10) {
+          if ((x * 7 + y * 13) % 4 === 0) {
+            ctx.fillRect(x, y, 2, 2);
+          }
+        }
+      }
     }
-  } catch (err) {
-    console.error('Safe drawImageCover caught error:', err);
+  } finally {
+    ctx.restore();
   }
 }
 
 /**
- * Composites the full 4-cut photobooth strip onto an HTML5 canvas safely
+ * Composites the photobooth strip onto an HTML5 canvas.
+ * Handles flexible templates (1, 2, 3, 4, 6 cuts), per-photo adjustments,
+ * transform (pan, zoom, rotate, mirror), stickers, multiple text layers, and borders.
  */
+let renderSequenceId = 0;
+
 export async function renderPhotoStrip({
   canvas,
   template,
   photos = [],
   filterId = 'normal',
+  filterIntensity = 100,
+  adjustments = {},
+  photoTransforms = {},
   paperColor = '#ffffff',
+  paperPattern = 'none',
+  borders = { width: 0, color: '#ffffff', radius: 14 },
+  stickers = [],
+  texts = [],
   dateStamp = true,
   customFooterText = '',
+  cancelToken = null,
 }) {
+  const currentSeq = ++renderSequenceId;
+
   try {
     if (!canvas || !template) return null;
 
@@ -128,44 +142,42 @@ export async function renderPhotoStrip({
     ctx.clearRect(0, 0, exportW, exportH);
 
     // -------------------------------------------------------------
-    // STEP 1: DRAW BACKGROUND PAPER LAYER
+    // STEP 1: BACKGROUND COLOR & PATTERN
     // -------------------------------------------------------------
     ctx.fillStyle = paperColor || template.defaultPaper || '#ffffff';
     ctx.fillRect(0, 0, exportW, exportH);
 
-    // Subtle paper grain simulation
-    ctx.save();
-    try {
-      ctx.fillStyle = 'rgba(0, 0, 0, 0.015)';
-      for (let y = 0; y < exportH; y += 12) {
-        for (let x = 0; x < exportW; x += 12) {
-          if ((x ^ y) % 3 === 0) {
-            ctx.fillRect(x, y, 2, 2);
-          }
-        }
-      }
-    } finally {
-      ctx.restore();
-    }
+    drawBackgroundPattern(ctx, paperPattern, exportW, exportH);
 
     // -------------------------------------------------------------
-    // STEP 2: DRAW THE 4 CAPTURED PHOTOS INTO DESIGNATED CUTOUTS
+    // STEP 2: DRAW PHOTOS INTO CUTOUT SLOTS
     // -------------------------------------------------------------
     const scaleX = exportW / (template.baseWidth || 1200);
     const scaleY = exportH / (template.baseHeight || 3600);
 
-    const filter = getFilterById(filterId);
+    const cutouts = Array.isArray(template.cutouts) && template.cutouts.length > 0
+      ? template.cutouts
+      : [];
 
-    const cutouts = Array.isArray(template.cutouts) ? template.cutouts : [];
+    const slotCount = template.slotCount || cutouts.length || 4;
 
-    for (let i = 0; i < cutouts.length; i++) {
-      const rawCutout = cutouts[i];
+    for (let i = 0; i < slotCount; i++) {
+      if (cancelToken?.isCancelled || currentSeq !== renderSequenceId) return null;
+
+      const rawCutout = cutouts[i] || {
+        x: 80,
+        y: 120 + i * 700,
+        width: 1040,
+        height: 640,
+        radius: 14,
+      };
+
       const cutout = {
         x: rawCutout.x * scaleX,
         y: rawCutout.y * scaleY,
         width: rawCutout.width * scaleX,
         height: rawCutout.height * scaleY,
-        radius: (rawCutout.radius || 12) * scaleX,
+        radius: (borders?.radius ?? (rawCutout.radius || 12)) * scaleX,
       };
 
       const photoItem = photos[i];
@@ -186,50 +198,143 @@ export async function renderPhotoStrip({
         }
 
         if (imgObj) {
+          // Per-slot or global transform & adjustments
+          const transform = photoTransforms[i] || {};
+          const slotAdj = { ...adjustments, ...(transform.adjustments || {}) };
+
+          const cssFilter = buildComposedFilterString(filterId, filterIntensity, slotAdj);
+          const tintColor = getInterpolatedTintColor(filterId, filterIntensity);
+
           ctx.save();
           try {
-            // Apply filter to photo
-            if (filter && filter.cssFilter && filter.cssFilter !== 'none') {
-              ctx.filter = filter.cssFilter;
+            // Clip to cutout path with rounded corners
+            ctx.beginPath();
+            if (cutout.radius > 0 && typeof ctx.roundRect === 'function') {
+              ctx.roundRect(cutout.x, cutout.y, cutout.width, cutout.height, cutout.radius);
+            } else {
+              ctx.rect(cutout.x, cutout.y, cutout.width, cutout.height);
             }
-            drawImageCover(ctx, imgObj, cutout.x, cutout.y, cutout.width, cutout.height, cutout.radius);
+            ctx.closePath();
+            ctx.clip();
+
+            // Apply filter
+            if (cssFilter && cssFilter !== 'none') {
+              ctx.filter = cssFilter;
+            }
+
+            // Calculate precise cover crop with pan, zoom, rotate
+            const crop = calculateCoverCrop({
+              sourceWidth: imgObj.width || imgObj.videoWidth,
+              sourceHeight: imgObj.height || imgObj.videoHeight,
+              targetWidth: cutout.width,
+              targetHeight: cutout.height,
+              zoom: transform.zoom || 1.0,
+              panX: transform.panX || 0,
+              panY: transform.panY || 0,
+              rotate: transform.rotate || 0,
+            });
+
+            // Handle mirroring or rotation within slot
+            if (transform.mirror || transform.rotate) {
+              ctx.save();
+              ctx.translate(cutout.x + cutout.width / 2, cutout.y + cutout.height / 2);
+              if (transform.mirror) ctx.scale(-1, 1);
+              if (transform.rotate) ctx.rotate((transform.rotate * Math.PI) / 180);
+              ctx.drawImage(
+                imgObj,
+                crop.sx,
+                crop.sy,
+                crop.sw,
+                crop.sh,
+                -cutout.width / 2,
+                -cutout.height / 2,
+                cutout.width,
+                cutout.height
+              );
+              ctx.restore();
+            } else {
+              ctx.drawImage(
+                imgObj,
+                crop.sx,
+                crop.sy,
+                crop.sw,
+                crop.sh,
+                cutout.x,
+                cutout.y,
+                cutout.width,
+                cutout.height
+              );
+            }
+
+            // Filter tint
+            if (tintColor) {
+              ctx.fillStyle = tintColor;
+              ctx.fillRect(cutout.x, cutout.y, cutout.width, cutout.height);
+            }
+
+            // Vignette effect if configured
+            if (slotAdj.vignette && slotAdj.vignette > 0) {
+              const vigFactor = Math.min(1, slotAdj.vignette / 100);
+              const cx = cutout.x + cutout.width / 2;
+              const cy = cutout.y + cutout.height / 2;
+              const rad = Math.max(cutout.width, cutout.height) / 1.4;
+              const vigGrad = ctx.createRadialGradient(cx, cy, rad * 0.4, cx, cy, rad);
+              vigGrad.addColorStop(0, 'rgba(0, 0, 0, 0)');
+              vigGrad.addColorStop(1, `rgba(0, 0, 0, ${(0.65 * vigFactor).toFixed(2)})`);
+              ctx.fillStyle = vigGrad;
+              ctx.fillRect(cutout.x, cutout.y, cutout.width, cutout.height);
+            }
+
+            // Film Grain effect if configured
+            if (slotAdj.grain && slotAdj.grain > 0) {
+              const grainFactor = Math.min(1, slotAdj.grain / 100);
+              ctx.fillStyle = `rgba(0, 0, 0, ${(0.08 * grainFactor).toFixed(3)})`;
+              const gStep = 6;
+              for (let gy = cutout.y; gy < cutout.y + cutout.height; gy += gStep) {
+                for (let gx = cutout.x; gx < cutout.x + cutout.width; gx += gStep) {
+                  if ((gx * 3 + gy * 7) % 5 === 0) {
+                    ctx.fillRect(gx, gy, 1.5, 1.5);
+                  }
+                }
+              }
+            }
           } finally {
             ctx.restore();
           }
 
-          // Optional subtle filter tint
-          if (filter && filter.tintColor) {
+          // Optional photo slot border
+          if (borders?.width && borders.width > 0) {
             ctx.save();
             try {
+              ctx.strokeStyle = borders.color || '#ffffff';
+              ctx.lineWidth = borders.width * scaleX;
               ctx.beginPath();
-              if (typeof ctx.roundRect === 'function') {
+              if (cutout.radius > 0 && typeof ctx.roundRect === 'function') {
                 ctx.roundRect(cutout.x, cutout.y, cutout.width, cutout.height, cutout.radius);
               } else {
                 ctx.rect(cutout.x, cutout.y, cutout.width, cutout.height);
               }
-              ctx.clip();
-              ctx.fillStyle = filter.tintColor;
-              ctx.fillRect(cutout.x, cutout.y, cutout.width, cutout.height);
+              ctx.stroke();
             } finally {
               ctx.restore();
             }
           }
         }
       } else {
-        // Empty placeholder window
+        // Empty placeholder slot
         ctx.save();
         try {
-          ctx.fillStyle = 'rgba(235, 230, 222, 0.55)';
+          ctx.fillStyle = 'rgba(235, 230, 222, 0.45)';
           ctx.beginPath();
-          if (typeof ctx.roundRect === 'function') {
+          if (cutout.radius > 0 && typeof ctx.roundRect === 'function') {
             ctx.roundRect(cutout.x, cutout.y, cutout.width, cutout.height, cutout.radius);
           } else {
             ctx.rect(cutout.x, cutout.y, cutout.width, cutout.height);
           }
           ctx.fill();
 
-          ctx.fillStyle = 'rgba(120, 110, 100, 0.4)';
-          ctx.font = `600 ${Math.round(42 * scaleX)}px 'Plus Jakarta Sans', sans-serif`;
+          ctx.fillStyle = 'rgba(120, 110, 100, 0.35)';
+          ctx.font = `600 ${Math.round(36 * scaleX)}px 'Plus Jakarta Sans', sans-serif`;
           ctx.textAlign = 'center';
           ctx.textBaseline = 'middle';
           ctx.fillText(
@@ -244,30 +349,106 @@ export async function renderPhotoStrip({
     }
 
     // -------------------------------------------------------------
-    // STEP 3: DRAW CUSTOM TEMPLATE PNG OVERLAY IMAGE ON TOP
+    // STEP 3: TEMPLATE OVERLAY (Frame PNG if available)
     // -------------------------------------------------------------
-    ctx.save();
-    try {
-      ctx.filter = 'none';
+    if (template.src || template.fallbackSrc) {
+      ctx.save();
+      try {
+        ctx.filter = 'none';
+        let overlayImg = await loadTemplateImage(template.src);
+        if (!overlayImg && template.fallbackSrc) {
+          overlayImg = await loadTemplateImage(template.fallbackSrc);
+        }
 
-      let overlayImg = await loadTemplateImage(template.src);
-      if (!overlayImg && template.fallbackSrc) {
-        overlayImg = await loadTemplateImage(template.fallbackSrc);
+        if (overlayImg) {
+          ctx.drawImage(overlayImg, 0, 0, exportW, exportH);
+        }
+      } finally {
+        ctx.restore();
       }
-
-      if (overlayImg) {
-        ctx.drawImage(overlayImg, 0, 0, exportW, exportH);
-      } else {
-        ctx.strokeStyle = '#333333';
-        ctx.lineWidth = 16 * scaleX;
-        ctx.strokeRect(0, 0, exportW, exportH);
-      }
-    } finally {
-      ctx.restore();
     }
 
     // -------------------------------------------------------------
-    // FOOTER TIMESTAMP & BRANDING
+    // STEP 4: STICKERS & DECORATIONS LAYER
+    // -------------------------------------------------------------
+    if (Array.isArray(stickers) && stickers.length > 0) {
+      // Sort by zIndex if present
+      const sortedStickers = [...stickers].sort((a, b) => (a.zIndex || 0) - (b.zIndex || 0));
+
+      for (const st of sortedStickers) {
+        if (!st || !st.type) continue;
+        const stickerDef = getStickerById(st.type);
+        if (!stickerDef) continue;
+
+        const stickerImg = await loadStickerImage(stickerDef);
+        if (stickerImg) {
+          ctx.save();
+          try {
+            const posX = (st.x ?? 0.5) * exportW;
+            const posY = (st.y ?? 0.5) * exportH;
+            const size = (st.size ?? 120) * scaleX;
+            const rot = ((st.rotation ?? 0) * Math.PI) / 180;
+            const opacity = st.opacity ?? 1.0;
+
+            ctx.globalAlpha = opacity;
+            ctx.translate(posX, posY);
+            if (rot !== 0) ctx.rotate(rot);
+
+            ctx.drawImage(stickerImg, -size / 2, -size / 2, size, size);
+          } finally {
+            ctx.restore();
+          }
+        }
+      }
+    }
+
+    // -------------------------------------------------------------
+    // STEP 5: CUSTOM TEXT ELEMENTS
+    // -------------------------------------------------------------
+    if (Array.isArray(texts) && texts.length > 0) {
+      for (const txt of texts) {
+        if (!txt || !txt.text) continue;
+        ctx.save();
+        try {
+          const posX = (txt.x ?? 0.5) * exportW;
+          const posY = (txt.y ?? 0.9) * exportH;
+          const fontSz = Math.round((txt.fontSize ?? 32) * scaleX);
+          const fontFam = txt.fontFamily || 'Plus Jakarta Sans';
+          const weight = txt.fontWeight || '700';
+          const rot = ((txt.rotation ?? 0) * Math.PI) / 180;
+
+          ctx.translate(posX, posY);
+          if (rot !== 0) ctx.rotate(rot);
+
+          ctx.font = `${weight} ${fontSz}px '${fontFam}', sans-serif`;
+          ctx.textAlign = txt.align || 'center';
+          ctx.textBaseline = 'middle';
+
+          // Optional text shadow
+          if (txt.shadowColor) {
+            ctx.shadowColor = txt.shadowColor;
+            ctx.shadowBlur = 8 * scaleX;
+            ctx.shadowOffsetX = 2 * scaleX;
+            ctx.shadowOffsetY = 2 * scaleX;
+          }
+
+          // Optional text outline
+          if (txt.outlineColor && txt.outlineWidth) {
+            ctx.strokeStyle = txt.outlineColor;
+            ctx.lineWidth = txt.outlineWidth * scaleX;
+            ctx.strokeText(txt.text, 0, 0);
+          }
+
+          ctx.fillStyle = txt.color || '#1e293b';
+          ctx.fillText(txt.text, 0, 0);
+        } finally {
+          ctx.restore();
+        }
+      }
+    }
+
+    // -------------------------------------------------------------
+    // STEP 6: FOOTER TIMESTAMP & BRANDING
     // -------------------------------------------------------------
     if (dateStamp || customFooterText) {
       ctx.save();
@@ -277,9 +458,8 @@ export async function renderPhotoStrip({
         const text = customFooterText || `${formattedDate}  •  RETROBOOTH STUDIO`;
 
         ctx.fillStyle = template.id === 'classic-film' ? 'rgba(220, 185, 120, 0.85)' : 'rgba(50, 50, 60, 0.75)';
-        ctx.font = `700 ${Math.round(26 * scaleX)}px 'Space Grotesk', 'Plus Jakarta Sans', sans-serif`;
+        ctx.font = `700 ${Math.round(24 * scaleX)}px 'Space Grotesk', 'Plus Jakarta Sans', sans-serif`;
         ctx.textAlign = 'center';
-        ctx.letterSpacing = '3px';
         ctx.fillText(text, exportW / 2, exportH - Math.round(55 * scaleY));
       } finally {
         ctx.restore();

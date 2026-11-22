@@ -1,4 +1,5 @@
-import { getSupportedVideoMimeType } from './videoGenerator';
+import { getSupportedVideoMimeType } from './videoGenerator.js';
+import { calculateViewfinderCrop } from './geometry.js';
 
 export class LiveSessionRecorder {
   constructor({ videoEl, isMirrored = true, lensZoomScale = 1.0, activeFilter = null, width, height }) {
@@ -18,6 +19,7 @@ export class LiveSessionRecorder {
     this.canvas.height = this.height;
     this.ctx = this.canvas.getContext('2d', { alpha: false, willReadFrequently: true });
 
+    this.stream = null;
     this.mediaRecorder = null;
     this.chunks = [];
     this.isRecording = false;
@@ -100,29 +102,22 @@ export class LiveSessionRecorder {
           ctx.filter = this.activeFilter.cssFilter;
         }
 
-        const vw = this.videoEl.videoWidth;
-        const vh = this.videoEl.videoHeight;
-        const scale = this.lensZoomScale || 1.0;
-
-        // Source crop rectangle matching lens zoom scale (1.38x on 1x mode, 1.0x on 0.5x mode)
-        const sw = vw / scale;
-        const sh = vh / scale;
-        const sx = (vw - sw) / 2;
-        const sy = (vh - sh) / 2;
-
-        ctx.drawImage(this.videoEl, sx, sy, sw, sh, 0, 0, w, h);
+        const crop = calculateViewfinderCrop(this.videoEl.videoWidth, this.videoEl.videoHeight, this.lensZoomScale);
+        ctx.drawImage(this.videoEl, crop.sx, crop.sy, crop.sw, crop.sh, 0, 0, w, h);
         ctx.restore();
 
-        // Optional filter color tint
+        // Optional filter tint
         if (this.activeFilter && this.activeFilter.tintColor) {
           ctx.fillStyle = this.activeFilter.tintColor;
           ctx.fillRect(0, 0, w, h);
         }
       }
 
-      // Flash effect frame
+      // -------------------------------------------------------------
+      // FLASH EFFECT
+      // -------------------------------------------------------------
       if (this.isFlashing) {
-        ctx.fillStyle = 'rgba(255, 255, 255, 0.95)';
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
         ctx.fillRect(0, 0, w, h);
       }
 
@@ -168,12 +163,12 @@ export class LiveSessionRecorder {
       ctx.fillStyle = '#ffffff';
       ctx.font = `700 ${Math.round(13 * scaleFactor)}px system-ui, sans-serif`;
       ctx.textAlign = 'center';
-      ctx.fillText(`SHOT 0${this.currentShot} / 04`, badgeX + badgeW / 2, badgeY + badgeH / 2);
+      ctx.fillText(`SHOT 0${this.currentShot}`, badgeX + badgeW / 2, badgeY + badgeH / 2);
 
       // Center: Countdown Number or "Smile!"
       if (this.countdown !== null && !this.isFlashing) {
-        const text = String(this.countdown);
         ctx.save();
+        const text = String(this.countdown);
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
 
@@ -212,6 +207,7 @@ export class LiveSessionRecorder {
     return new Promise((resolve) => {
       try {
         if (!this.isRecording || !this.mediaRecorder) {
+          this.cleanupTracks();
           resolve(null);
           return;
         }
@@ -224,22 +220,41 @@ export class LiveSessionRecorder {
 
         this.mediaRecorder.onstop = () => {
           try {
-            const mime = this.mediaRecorder.mimeType || this.mimeInfo?.mime || 'video/mp4';
+            const mime = this.mediaRecorder?.mimeType || this.mimeInfo?.mime || 'video/mp4';
             const blob = new Blob(this.chunks, { type: mime });
             const url = URL.createObjectURL(blob);
             const ext = this.mimeInfo?.ext || 'mp4';
+            this.cleanupTracks();
             resolve({ blob, url, ext, mimeType: mime });
           } catch (stopErr) {
             console.error('Error finalising live video recording:', stopErr);
+            this.cleanupTracks();
             resolve(null);
           }
         };
 
-        this.mediaRecorder.stop();
+        if (this.mediaRecorder.state !== 'inactive') {
+          this.mediaRecorder.stop();
+        } else {
+          this.cleanupTracks();
+          resolve(null);
+        }
       } catch (err) {
         console.error('LiveSessionRecorder stop error:', err);
+        this.cleanupTracks();
         resolve(null);
       }
     });
+  }
+
+  cleanupTracks() {
+    if (this.stream) {
+      try {
+        this.stream.getTracks().forEach(t => {
+          try { t.stop(); } catch (e) {}
+        });
+      } catch (e) {}
+      this.stream = null;
+    }
   }
 }

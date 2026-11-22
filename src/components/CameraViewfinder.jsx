@@ -8,7 +8,11 @@ import {
   Sparkles, 
   AlertCircle,
   ShieldCheck,
-  ExternalLink
+  ExternalLink,
+  Settings,
+  SlidersHorizontal,
+  Volume2,
+  VolumeX,
 } from 'lucide-react';
 import { getFilterById } from '../utils/filters';
 
@@ -16,9 +20,11 @@ export default function CameraViewfinder({
   camera,
   activeFilterId,
   onStartBurst,
+  onManualCapture,
   photosCount = 0,
 }) {
   const [showGrid, setShowGrid] = useState(true);
+  const [showSettings, setShowSettings] = useState(false);
   const activeFilter = getFilterById(activeFilterId);
 
   // Directly bind stream to video element whenever stream updates
@@ -38,13 +44,34 @@ export default function CameraViewfinder({
     }
   }, [camera.stream, camera.videoRef]);
 
-  // Keyboard shortcut: Spacebar triggers capture
+  // Spacebar capture keyboard shortcut with full guard against input fields & modals
   useEffect(() => {
     const handleKeyDown = (e) => {
       try {
+        if (e.repeat) return; // Prevent repeated triggers from holding key
+
+        const target = e.target;
+        if (target) {
+          const tag = target.tagName ? target.tagName.toUpperCase() : '';
+          if (
+            tag === 'INPUT' ||
+            tag === 'TEXTAREA' ||
+            tag === 'SELECT' ||
+            tag === 'BUTTON' ||
+            target.isContentEditable ||
+            target.closest?.('dialog, [role="dialog"], .modal-container, input, textarea, select')
+          ) {
+            return;
+          }
+        }
+
         if (e.code === 'Space' && !camera.isCapturingBurst && camera.hasPermission) {
           e.preventDefault();
-          if (onStartBurst) onStartBurst();
+          if (camera.captureMode === 'manual' && onManualCapture) {
+            onManualCapture();
+          } else if (onStartBurst) {
+            onStartBurst();
+          }
         }
       } catch (err) {
         console.warn('Keyboard space trigger warning:', err);
@@ -52,7 +79,7 @@ export default function CameraViewfinder({
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [camera.isCapturingBurst, camera.hasPermission, onStartBurst]);
+  }, [camera.isCapturingBurst, camera.hasPermission, camera.captureMode, onStartBurst, onManualCapture]);
 
   // Optical Framing Transform:
   // Strictly matched to camera.lensZoomScale (1.38 on 1x mode, 1.0 on 0.5x mode)
@@ -71,14 +98,19 @@ export default function CameraViewfinder({
     }
   }, [camera.isMirrored, camera.lensZoomScale]);
 
-  // Switch protocol to HTTPS
+  // Dynamic HTTPS redirect (without hardcoded port)
   const handleSwitchToHttps = () => {
     try {
       if (typeof window !== 'undefined') {
-        window.location.href = `https://${window.location.hostname}:3000${window.location.pathname}`;
+        const port = window.location.port ? `:${window.location.port}` : '';
+        window.location.href = `https://${window.location.hostname}${port}${window.location.pathname}${window.location.search}`;
       }
     } catch (e) {}
   };
+
+  const videoW = camera.videoRef.current?.videoWidth;
+  const videoH = camera.videoRef.current?.videoHeight;
+  const resolutionText = videoW && videoH ? `${videoW}×${videoH}` : null;
 
   return (
     <div className="relative w-full h-full flex flex-col items-center justify-between bg-black rounded-3xl overflow-hidden border border-studio-700/60 shadow-2xl select-none">
@@ -87,7 +119,7 @@ export default function CameraViewfinder({
       {/* TOP FLOATING CONTROLS BAR */}
       {/* ============================================================ */}
       <div className="absolute top-3 inset-x-3 z-30 flex items-center justify-between pointer-events-auto">
-        <div className="flex items-center gap-1.5 p-1 bg-studio-900/80 backdrop-blur-md rounded-2xl border border-white/10 shadow-lg">
+        <div className="flex items-center gap-1.5 p-1 bg-studio-900/85 backdrop-blur-md rounded-2xl border border-white/10 shadow-lg">
           {/* Mirror Toggle */}
           <button
             onClick={() => {
@@ -120,19 +152,40 @@ export default function CameraViewfinder({
           <button
             onClick={() => {
               try {
-                camera.setCountdownDelay(prev => (prev === 3 ? 5 : 3));
+                const delays = [0, 3, 5, 10];
+                const nextIdx = (delays.indexOf(camera.countdownDelay) + 1) % delays.length;
+                camera.setCountdownDelay(delays[nextIdx]);
               } catch (e) {}
             }}
-            title="Change Countdown Delay (3s / 5s)"
+            title="Cycle Countdown (0s / 3s / 5s / 10s)"
             className="flex items-center gap-1 px-2.5 py-1.5 rounded-xl text-xs font-semibold text-slate-200 hover:bg-white/10 transition-all"
           >
             <Timer className="w-3.5 h-3.5 text-accent-amber" />
-            <span>{camera.countdownDelay}s</span>
+            <span>{camera.countdownDelay === 0 ? 'Off' : `${camera.countdownDelay}s`}</span>
+          </button>
+
+          {/* Settings Drawer Toggle */}
+          <button
+            onClick={() => setShowSettings(prev => !prev)}
+            title="Photoshoot Settings"
+            className={`p-2 rounded-xl transition-all ${
+              showSettings
+                ? 'bg-rose-500 text-white'
+                : 'text-slate-300 hover:text-white hover:bg-white/10'
+            }`}
+          >
+            <SlidersHorizontal className="w-4 h-4" />
           </button>
         </div>
 
         {/* Right Top: Camera Switcher */}
-        <div className="flex items-center gap-1.5 p-1 bg-studio-900/80 backdrop-blur-md rounded-2xl border border-white/10 shadow-lg">
+        <div className="flex items-center gap-1.5 p-1 bg-studio-900/85 backdrop-blur-md rounded-2xl border border-white/10 shadow-lg">
+          {resolutionText && (
+            <span className="hidden sm:inline-block text-[10px] font-mono text-slate-400 px-2">
+              {resolutionText}
+            </span>
+          )}
+
           {camera.devices.length > 1 && (
             <select
               value={camera.selectedDeviceId}
@@ -161,6 +214,77 @@ export default function CameraViewfinder({
           </button>
         </div>
       </div>
+
+      {/* ============================================================ */}
+      {/* SETTINGS OVERLAY PANEL */}
+      {/* ============================================================ */}
+      {showSettings && (
+        <div className="absolute top-16 left-3 z-35 w-72 bg-studio-900/95 backdrop-blur-xl border border-white/15 rounded-2xl p-3.5 shadow-2xl flex flex-col gap-3 text-xs pointer-events-auto animate-scale-in">
+          <div>
+            <span className="text-[11px] font-bold uppercase tracking-wider text-rose-400">Capture Count</span>
+            <div className="grid grid-cols-5 gap-1.5 mt-1.5">
+              {[1, 2, 3, 4, 6].map(count => (
+                <button
+                  key={count}
+                  onClick={() => camera.setCaptureCount(count)}
+                  className={`py-1.5 rounded-xl font-bold transition-all ${
+                    camera.captureCount === count
+                      ? 'bg-rose-500 text-white shadow-sm'
+                      : 'bg-white/5 text-slate-300 hover:bg-white/10'
+                  }`}
+                >
+                  {count}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div>
+            <span className="text-[11px] font-bold uppercase tracking-wider text-rose-400">Capture Mode</span>
+            <div className="grid grid-cols-2 gap-1.5 mt-1.5">
+              <button
+                onClick={() => camera.setCaptureMode('auto')}
+                className={`py-1.5 px-2 rounded-xl font-bold transition-all ${
+                  camera.captureMode === 'auto'
+                    ? 'bg-rose-500 text-white'
+                    : 'bg-white/5 text-slate-300 hover:bg-white/10'
+                }`}
+              >
+                Auto Burst
+              </button>
+              <button
+                onClick={() => camera.setCaptureMode('manual')}
+                className={`py-1.5 px-2 rounded-xl font-bold transition-all ${
+                  camera.captureMode === 'manual'
+                    ? 'bg-rose-500 text-white'
+                    : 'bg-white/5 text-slate-300 hover:bg-white/10'
+                }`}
+              >
+                Manual Snap
+              </button>
+            </div>
+          </div>
+
+          <div>
+            <span className="text-[11px] font-bold uppercase tracking-wider text-rose-400">Countdown Timer</span>
+            <div className="grid grid-cols-4 gap-1.5 mt-1.5">
+              {[0, 3, 5, 10].map(sec => (
+                <button
+                  key={sec}
+                  onClick={() => camera.setCountdownDelay(sec)}
+                  className={`py-1 rounded-xl font-bold transition-all ${
+                    camera.countdownDelay === sec
+                      ? 'bg-accent-amber text-black'
+                      : 'bg-white/5 text-slate-300 hover:bg-white/10'
+                  }`}
+                >
+                  {sec === 0 ? 'Off' : `${sec}s`}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ============================================================ */}
       {/* VIDEO VIEWFINDER AREA */}
@@ -270,7 +394,7 @@ export default function CameraViewfinder({
               </span>
               <div className="mt-3 flex items-center gap-2 px-4 py-1.5 rounded-full bg-white/20 backdrop-blur-md text-white text-xs font-semibold">
                 <Sparkles className="w-3.5 h-3.5 text-accent-amber animate-spin" />
-                <span>Shot {camera.burstProgress + 1} of 4</span>
+                <span>Shot {camera.burstProgress + 1} of {camera.captureCount}</span>
               </div>
             </div>
           </div>
@@ -315,10 +439,10 @@ export default function CameraViewfinder({
       <div className="relative w-full z-30 pb-4 pt-2 px-6 flex items-center justify-between bg-gradient-to-t from-studio-950 via-studio-950/80 to-transparent">
         
         {/* Left: Active Shot Indicator */}
-        <div className="w-20 flex flex-col items-start">
+        <div className="w-24 flex flex-col items-start">
           <span className="text-[10px] uppercase font-bold tracking-wider text-slate-400">Captured</span>
-          <div className="flex items-center gap-1 mt-1">
-            {[0, 1, 2, 3].map(idx => (
+          <div className="flex items-center gap-1.5 mt-1 flex-wrap max-w-[90px]">
+            {Array.from({ length: camera.captureCount }).map((_, idx) => (
               <div
                 key={idx}
                 className={`w-2.5 h-2.5 rounded-full transition-all duration-300 ${
@@ -336,13 +460,17 @@ export default function CameraViewfinder({
           <button
             onClick={() => {
               try {
-                if (onStartBurst) onStartBurst();
+                if (camera.captureMode === 'manual') {
+                  if (onManualCapture) onManualCapture();
+                } else {
+                  if (onStartBurst) onStartBurst();
+                }
               } catch (err) {
                 console.error('Shutter trigger error:', err);
               }
             }}
             disabled={camera.isCapturingBurst || !camera.hasPermission}
-            title="Start 4-Photo Burst Sequence (or press Space)"
+            title={camera.captureMode === 'manual' ? 'Take Photo' : 'Start Burst (Space)'}
             className={`relative group flex items-center justify-center w-20 h-20 rounded-full transition-all duration-200 active:scale-95 ${
               camera.isCapturingBurst
                 ? 'cursor-not-allowed opacity-80'
@@ -369,14 +497,18 @@ export default function CameraViewfinder({
           </button>
           
           <span className="text-[10px] text-slate-400 mt-1.5 font-medium tracking-wide">
-            {camera.isCapturingBurst ? `Burst ${camera.burstProgress + 1}/4` : 'TAP OR SPACE'}
+            {camera.isCapturingBurst
+              ? `Burst ${camera.burstProgress + 1}/${camera.captureCount}`
+              : camera.captureMode === 'manual'
+                ? `SNAP (${photosCount}/${camera.captureCount})`
+                : 'TAP OR SPACE'}
           </span>
         </div>
 
         {/* Right: Active Filter Badge Indicator */}
-        <div className="w-20 flex flex-col items-end">
+        <div className="w-24 flex flex-col items-end">
           <span className="text-[10px] uppercase font-bold tracking-wider text-slate-400">Filter</span>
-          <span className="text-xs font-semibold text-rose-300 mt-0.5 truncate max-w-[80px]">
+          <span className="text-xs font-semibold text-rose-300 mt-0.5 truncate max-w-[90px]">
             {activeFilter.name}
           </span>
         </div>

@@ -16,7 +16,8 @@ import {
   Image as ImageIcon,
   Wand2,
   Calendar,
-  AlertCircle
+  AlertCircle,
+  Printer
 } from 'lucide-react';
 
 export default function ExportModal({
@@ -25,12 +26,21 @@ export default function ExportModal({
   template,
   photos = [],
   sessionVideo = null,
-  filterId: initialFilterId,
-  paperColor,
+  filterId: initialFilterId = 'normal',
+  filterIntensity: initialFilterIntensity = 100,
+  adjustments: initialAdjustments = {},
+  photoTransforms: initialPhotoTransforms = {},
+  paperColor = '#ffffff',
+  paperPattern = 'none',
+  borders = { width: 0, color: '#ffffff', radius: 14 },
+  stickers = [],
+  texts = [],
   onUpdateFilter,
+  onOpenPrintStudio,
 }) {
   const [activeTab, setActiveTab] = useState('strip'); // 'strip' | 'video' | 'gif'
   const [filterId, setFilterId] = useState(initialFilterId);
+  const [filterIntensity, setFilterIntensity] = useState(initialFilterIntensity);
   const [customText, setCustomText] = useState('');
   
   // GIF state
@@ -50,11 +60,14 @@ export default function ExportModal({
 
   const canvasRef = useRef(null);
   const videoElemRef = useRef(null);
+  const activeGifUrlRef = useRef(null);
+  const activeVideoUrlRef = useRef(null);
 
-  // Sync filterId with prop
+  // Sync initial filterId
   useEffect(() => {
     setFilterId(initialFilterId);
-  }, [initialFilterId]);
+    setFilterIntensity(initialFilterIntensity);
+  }, [initialFilterId, initialFilterIntensity]);
 
   // Sync live session video if provided by camera
   useEffect(() => {
@@ -62,12 +75,31 @@ export default function ExportModal({
       setVideoUrl(sessionVideo.url);
       setVideoBlob(sessionVideo.blob);
       setVideoExt(sessionVideo.ext || 'mp4');
+      activeVideoUrlRef.current = sessionVideo.url;
     }
   }, [sessionVideo]);
 
+  // Invalidate generated media when source photos or filter changes
+  useEffect(() => {
+    if (gifUrl) {
+      try { URL.revokeObjectURL(gifUrl); } catch (e) {}
+      setGifUrl(null);
+      activeGifUrlRef.current = null;
+    }
+  }, [photos, filterId, filterIntensity]);
+
+  // Cleanup object URLs on unmount
+  useEffect(() => {
+    return () => {
+      if (activeGifUrlRef.current) {
+        try { URL.revokeObjectURL(activeGifUrlRef.current); } catch (e) {}
+      }
+    };
+  }, []);
+
   // Confetti celebration when modal opens
   useEffect(() => {
-    if (isOpen && photos.length >= 4) {
+    if (isOpen && photos.length >= 1) {
       try {
         playCelebrationSound();
       } catch (e) {}
@@ -78,31 +110,39 @@ export default function ExportModal({
           origin: { y: 0.6 },
           colors: ['#ff6b95', '#b36bff', '#38d9a9', '#fcc419', '#ffffff'],
         });
-      } catch (err) {
-        console.debug('Confetti error', err);
-      }
+      } catch (err) {}
     }
   }, [isOpen, photos.length]);
 
   // Re-render strip when filter, text, or template changes
   useEffect(() => {
     if (!isOpen || !canvasRef.current || !template) return;
-    try {
-      renderPhotoStrip({
-        canvas: canvasRef.current,
-        template,
-        photos,
-        filterId,
-        paperColor,
-        dateStamp: true,
-        customFooterText: customText,
-      }).catch(err => {
-        console.warn('renderPhotoStrip caught warning in modal:', err);
-      });
-    } catch (err) {
-      console.error('Modal render error:', err);
-    }
-  }, [isOpen, template, photos, filterId, paperColor, customText]);
+    const cancelToken = { isCancelled: false };
+
+    renderPhotoStrip({
+      canvas: canvasRef.current,
+      template,
+      photos,
+      filterId,
+      filterIntensity,
+      adjustments: initialAdjustments,
+      photoTransforms: initialPhotoTransforms,
+      paperColor,
+      paperPattern,
+      borders,
+      stickers,
+      texts,
+      dateStamp: true,
+      customFooterText: customText,
+      cancelToken,
+    }).catch(err => {
+      console.warn('renderPhotoStrip caught warning in modal:', err);
+    });
+
+    return () => {
+      cancelToken.isCancelled = true;
+    };
+  }, [isOpen, template, photos, filterId, filterIntensity, initialAdjustments, initialPhotoTransforms, paperColor, paperPattern, borders, stickers, texts, customText]);
 
   // Generate GIF when GIF tab is opened
   useEffect(() => {
@@ -116,6 +156,8 @@ export default function ExportModal({
           const res = await createAnimatedGif({
             photos,
             filterId,
+            filterIntensity,
+            adjustments: initialAdjustments,
             width: 540,
             height: 405,
             frameDelayMs: 500,
@@ -125,6 +167,7 @@ export default function ExportModal({
           });
           if (!isCancelled && res) {
             setGifUrl(res.url);
+            activeGifUrlRef.current = res.url;
           }
         } catch (err) {
           console.error('Failed to create GIF safely:', err);
@@ -140,7 +183,7 @@ export default function ExportModal({
         isCancelled = true;
       };
     }
-  }, [isOpen, activeTab, gifUrl, photos, filterId]);
+  }, [isOpen, activeTab, gifUrl, photos, filterId, filterIntensity, initialAdjustments]);
 
   // Generate Video if not recorded during session
   useEffect(() => {
@@ -154,6 +197,8 @@ export default function ExportModal({
           const res = await createExportVideo({
             photos,
             filterId,
+            filterIntensity,
+            adjustments: initialAdjustments,
             width: 720,
             height: 960,
             durationSec: 4,
@@ -165,6 +210,7 @@ export default function ExportModal({
             setVideoUrl(res.url);
             setVideoBlob(res.blob);
             setVideoExt(res.ext || 'mp4');
+            activeVideoUrlRef.current = res.url;
           }
         } catch (err) {
           console.error('Failed to create video safely:', err);
@@ -180,21 +226,7 @@ export default function ExportModal({
         isCancelled = true;
       };
     }
-  }, [isOpen, activeTab, videoUrl, photos, filterId]);
-
-  // When filter changes, invalidate cached gif
-  const handleFilterChange = (fId) => {
-    try {
-      setFilterId(fId);
-      if (onUpdateFilter) onUpdateFilter(fId);
-      if (gifUrl) {
-        URL.revokeObjectURL(gifUrl);
-        setGifUrl(null);
-      }
-    } catch (err) {
-      console.warn('Filter change error:', err);
-    }
-  };
+  }, [isOpen, activeTab, videoUrl, photos, filterId, filterIntensity, initialAdjustments]);
 
   // Helper to trigger safe file download across iOS Safari, iPadOS, Chrome, and Desktop
   const downloadBlobOrShare = async (blob, filename, mimeType, successMsg) => {
@@ -248,7 +280,6 @@ export default function ExportModal({
       setTimeout(() => setStatusMessage(null), 2500);
     } catch (err) {
       console.error('downloadBlobOrShare error:', err);
-      // Ultimate fallback: open in new tab
       try {
         const blobUrl = URL.createObjectURL(blob);
         window.open(blobUrl, '_blank');
@@ -321,6 +352,33 @@ export default function ExportModal({
     }
   };
 
+  // Download WebP
+  const handleDownloadWebp = () => {
+    try {
+      const canvas = canvasRef.current;
+      if (!canvas) return;
+      canvas.toBlob(
+        async (blob) => {
+          if (!blob) {
+            setErrorMessage('WebP not supported, fallback to JPG.');
+            handleDownloadJpg();
+            return;
+          }
+          await downloadBlobOrShare(
+            blob,
+            `retrobooth-strip-${Date.now()}.webp`,
+            'image/webp',
+            'WebP downloaded successfully!'
+          );
+        },
+        'image/webp',
+        0.92
+      );
+    } catch (e) {
+      handleDownloadJpg();
+    }
+  };
+
   // Download Video
   const handleDownloadVideo = async () => {
     try {
@@ -370,7 +428,6 @@ export default function ExportModal({
       );
     } catch (err) {
       console.error('Download GIF caught error:', err);
-      // Fallback to simple link click
       try {
         const link = document.createElement('a');
         link.download = `retrobooth-animation-${Date.now()}.gif`;
@@ -385,7 +442,7 @@ export default function ExportModal({
     }
   };
 
-  // Native Web Share API (supports sharing images or live videos to iPhone/iPad camera roll!)
+  // Native Web Share API
   const handleShare = async () => {
     try {
       if (!navigator.share) {
@@ -395,7 +452,6 @@ export default function ExportModal({
       }
 
       if (activeTab === 'video' && videoBlob) {
-        // Share live video file directly to camera roll / Instagram
         const file = new File([videoBlob], `retrobooth-video-${Date.now()}.${videoExt}`, {
           type: videoBlob.type || 'video/mp4',
         });
@@ -409,7 +465,6 @@ export default function ExportModal({
         }
       }
 
-      // Default share photo strip
       const canvas = canvasRef.current;
       if (!canvas) return;
 
@@ -475,10 +530,8 @@ export default function ExportModal({
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-6 bg-black/80 backdrop-blur-xl select-none animate-fade-in">
-      
-      {/* Modal Container */}
-      <div className="relative w-full max-w-4xl h-full max-h-[92dvh] flex flex-col md:flex-row bg-studio-900 border border-studio-700/80 rounded-3xl overflow-hidden shadow-2xl">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-2 sm:p-4 md:p-6 bg-black/85 backdrop-blur-md animate-fade-in select-none">
+      <div className="relative w-full max-w-4xl h-[95vh] max-h-[820px] bg-studio-900 border border-studio-700 rounded-3xl shadow-2xl flex flex-col md:flex-row overflow-hidden">
         
         {/* Close Button */}
         <button
@@ -603,7 +656,7 @@ export default function ExportModal({
               <p className="text-xs text-slate-400 mt-0.5">
                 {activeTab === 'video'
                   ? 'Real live video recording from countdown to photos taken!'
-                  : 'Export in full resolution image or looping animated GIF.'}
+                  : 'Export in full resolution image, video, or looping GIF.'}
               </p>
             </div>
 
@@ -632,12 +685,15 @@ export default function ExportModal({
                 </span>
               </div>
               <div className="grid grid-cols-3 gap-1.5">
-                {FILTERS.map((f) => {
+                {FILTERS.slice(0, 6).map((f) => {
                   const isSel = f.id === filterId;
                   return (
                     <button
                       key={f.id}
-                      onClick={() => handleFilterChange(f.id)}
+                      onClick={() => {
+                        setFilterId(f.id);
+                        if (onUpdateFilter) onUpdateFilter(f.id);
+                      }}
                       className={`px-2 py-1.5 rounded-xl text-[11px] font-bold truncate transition-all border ${
                         isSel
                           ? 'bg-rose-500 text-white border-rose-400 shadow-sm'
@@ -653,7 +709,7 @@ export default function ExportModal({
           </div>
 
           {/* DOWNLOAD ACTION BUTTONS */}
-          <div className="flex flex-col gap-2.5 pt-4 border-t border-white/5">
+          <div className="flex flex-col gap-2 pt-4 border-t border-white/5">
             {statusMessage && (
               <div className="text-center text-xs font-semibold text-emerald-400 bg-emerald-500/10 py-1.5 rounded-xl border border-emerald-500/20">
                 {statusMessage}
@@ -673,26 +729,45 @@ export default function ExportModal({
                   className="w-full py-3 px-4 bg-gradient-to-r from-rose-500 to-pink-500 hover:from-rose-600 hover:to-pink-600 text-white rounded-2xl font-bold text-xs flex items-center justify-center gap-2 shadow-lg shadow-rose-500/25 transition-all active:scale-[0.98]"
                 >
                   <Download className="w-4 h-4" />
-                  <span>Download High-Res PNG (1200x3600)</span>
+                  <span>Download High-Res PNG</span>
                 </button>
 
-                <div className="grid grid-cols-2 gap-2">
+                <div className="grid grid-cols-3 gap-1.5">
                   <button
                     onClick={handleDownloadJpg}
-                    className="py-2.5 px-3 bg-studio-800 hover:bg-studio-700 text-slate-200 rounded-xl font-semibold text-xs flex items-center justify-center gap-1.5 border border-white/10 transition-all active:scale-[0.98]"
+                    className="py-2 px-2 bg-studio-800 hover:bg-studio-700 text-slate-200 rounded-xl font-semibold text-xs flex items-center justify-center gap-1 border border-white/10 active:scale-[0.98]"
                   >
-                    <Download className="w-3.5 h-3.5 text-accent-amber" />
-                    <span>Download JPG</span>
+                    <span>JPG</span>
+                  </button>
+
+                  <button
+                    onClick={handleDownloadWebp}
+                    className="py-2 px-2 bg-studio-800 hover:bg-studio-700 text-slate-200 rounded-xl font-semibold text-xs flex items-center justify-center gap-1 border border-white/10 active:scale-[0.98]"
+                  >
+                    <span>WebP</span>
                   </button>
 
                   <button
                     onClick={handleCopy}
-                    className="py-2.5 px-3 bg-studio-800 hover:bg-studio-700 text-slate-200 rounded-xl font-semibold text-xs flex items-center justify-center gap-1.5 border border-white/10 transition-all active:scale-[0.98]"
+                    className="py-2 px-2 bg-studio-800 hover:bg-studio-700 text-slate-200 rounded-xl font-semibold text-xs flex items-center justify-center gap-1 border border-white/10 active:scale-[0.98]"
                   >
                     <Copy className="w-3.5 h-3.5 text-accent-cyan" />
-                    <span>Copy Image</span>
+                    <span>Copy</span>
                   </button>
                 </div>
+
+                {/* Print Studio Button */}
+                <button
+                  onClick={() => {
+                    if (onOpenPrintStudio && canvasRef.current) {
+                      onOpenPrintStudio(canvasRef.current);
+                    }
+                  }}
+                  className="w-full py-2.5 px-3 bg-studio-800 hover:bg-studio-700 text-slate-200 rounded-xl font-semibold text-xs flex items-center justify-center gap-2 border border-white/10 active:scale-[0.98]"
+                >
+                  <Printer className="w-4 h-4 text-accent-amber" />
+                  <span>Print Studio (4x6" / A4 / 300 DPI)</span>
+                </button>
               </>
             ) : activeTab === 'video' ? (
               <button
@@ -722,7 +797,7 @@ export default function ExportModal({
               </button>
             )}
 
-            {/* Native Mobile Share Button (Saves Video / Strip to Camera Roll on iOS/iPadOS) */}
+            {/* Native Mobile Share Button */}
             {typeof navigator !== 'undefined' && typeof navigator.share === 'function' && (
               <button
                 onClick={handleShare}

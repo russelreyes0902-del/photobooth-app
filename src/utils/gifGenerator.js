@@ -1,5 +1,5 @@
 import * as gifencModule from 'gifenc';
-import { getFilterById } from './filters';
+import { buildComposedFilterString, getInterpolatedTintColor } from './filters.js';
 
 function getGifEnc() {
   const mod = gifencModule;
@@ -15,19 +15,21 @@ function getGifEnc() {
 }
 
 /**
- * Creates an animated looping GIF from the 4 captured photos with the active filter.
- * Uses 480x360 optimized frame size for rapid client-side encoding (~150-250ms).
+ * Creates an animated looping GIF from the captured photos with active filters and adjustments.
+ * Validates expected photos, maintains frame numbering, and handles errors explicitly.
  */
 export async function createAnimatedGif({
   photos = [],
   filterId = 'normal',
+  filterIntensity = 100,
+  adjustments = {},
   width = 540,
   height = 405,
   frameDelayMs = 500,
   onProgress = () => {},
 }) {
   try {
-    if (!photos || photos.length === 0) {
+    if (!photos || !Array.isArray(photos) || photos.length === 0) {
       throw new Error('No photos available to create GIF');
     }
 
@@ -41,39 +43,51 @@ export async function createAnimatedGif({
       throw new Error('Unable to create canvas 2D context for GIF');
     }
 
-    const filter = getFilterById(filterId);
+    const cssFilter = buildComposedFilterString(filterId, filterIntensity, adjustments);
+    const tintColor = getInterpolatedTintColor(filterId, filterIntensity);
+
     const gif = GIFEncoder();
     const totalFrames = photos.length;
 
-    for (let i = 0; i < totalFrames; i++) {
-      try {
-        onProgress(Math.round((i / totalFrames) * 90));
-      } catch (e) {}
-
-      const photo = photos[i];
-      let img = photo?.img;
-      if (!img && photo?.dataUrl) {
-        img = await new Promise((resolve) => {
-          try {
-            const image = new Image();
-            image.onload = () => resolve(image);
-            image.onerror = () => resolve(null);
-            image.src = photo.dataUrl;
-          } catch (e) {
+    // First, decode and validate all images
+    const decodedImages = await Promise.all(
+      photos.map((photo, idx) => {
+        return new Promise((resolve) => {
+          if (photo?.img) {
+            resolve(photo.img);
+          } else if (photo?.dataUrl) {
+            const im = new Image();
+            im.onload = () => resolve(im);
+            im.onerror = () => {
+              console.warn(`Failed to decode image at index ${idx}`);
+              resolve(null);
+            };
+            im.src = photo.dataUrl;
+          } else {
             resolve(null);
           }
         });
-      }
+      })
+    );
 
-      if (!img) continue;
+    const validImages = decodedImages.filter(Boolean);
+    if (validImages.length === 0) {
+      throw new Error('No valid photos could be loaded for GIF generation.');
+    }
 
+    for (let i = 0; i < validImages.length; i++) {
+      try {
+        onProgress(Math.round((i / validImages.length) * 90));
+      } catch (e) {}
+
+      const img = validImages[i];
       ctx.clearRect(0, 0, width, height);
 
-      // Apply aesthetic filter
+      // Apply composed aesthetic filter
       ctx.save();
       try {
-        if (filter && filter.cssFilter && filter.cssFilter !== 'none') {
-          ctx.filter = filter.cssFilter;
+        if (cssFilter && cssFilter !== 'none') {
+          ctx.filter = cssFilter;
         }
 
         const imgW = img.width || img.videoWidth || width;
@@ -96,8 +110,8 @@ export async function createAnimatedGif({
       }
 
       // Optional subtle filter tint
-      if (filter && filter.tintColor) {
-        ctx.fillStyle = filter.tintColor;
+      if (tintColor) {
+        ctx.fillStyle = tintColor;
         ctx.fillRect(0, 0, width, height);
       }
 
@@ -116,37 +130,44 @@ export async function createAnimatedGif({
         ctx.font = '700 12px system-ui, sans-serif';
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
-        ctx.fillText(`0${i + 1} / 0${totalFrames}`, width - 53, height - 25);
+        ctx.fillText(`0${i + 1} / 0${validImages.length}`, width - 53, height - 25);
       } catch (badgeErr) {}
 
-      // Quantize pixel data to 256 colors
+      // Quantize frame & write into GIF
       const imageData = ctx.getImageData(0, 0, width, height);
-      const rgba = imageData.data;
+      const { data } = imageData;
 
-      const palette = quantize(rgba, 256);
-      const index = applyPalette(rgba, palette);
+      const palette = quantize(data, 256);
+      const index = applyPalette(data, palette);
 
       gif.writeFrame(index, width, height, {
         palette,
         delay: frameDelayMs,
-        repeat: 0, // infinite loop
+        repeat: 0, // 0 = loop forever
       });
     }
 
-    try { onProgress(95); } catch (e) {}
+    try {
+      onProgress(95);
+    } catch (e) {}
+
     gif.finish();
     const bytes = gif.bytes();
-    if (!bytes || bytes.length === 0) {
-      throw new Error('GIF encoder produced empty byte array');
-    }
-
     const blob = new Blob([bytes], { type: 'image/gif' });
     const url = URL.createObjectURL(blob);
 
-    try { onProgress(100); } catch (e) {}
-    return { blob, url, byteLength: bytes.length };
-  } catch (fatalGifErr) {
-    console.error('Safe createAnimatedGif error:', fatalGifErr);
-    throw fatalGifErr;
+    try {
+      onProgress(100);
+    } catch (e) {}
+
+    return {
+      blob,
+      url,
+      byteSize: bytes.byteLength,
+      frameCount: validImages.length,
+    };
+  } catch (err) {
+    console.error('Fatal createAnimatedGif error:', err);
+    throw err;
   }
 }

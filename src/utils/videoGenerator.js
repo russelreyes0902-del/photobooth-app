@@ -1,4 +1,4 @@
-import { getFilterById } from './filters';
+import { getFilterById, buildComposedFilterString, getInterpolatedTintColor } from './filters.js';
 
 /**
  * Checks supported video mime type across browsers (iOS Safari, Chrome, Firefox, Edge)
@@ -11,8 +11,8 @@ export function getSupportedVideoMimeType() {
   const candidateTypes = [
     { mime: 'video/mp4;codecs=avc1', ext: 'mp4' },
     { mime: 'video/mp4', ext: 'mp4' },
-    { mime: 'video/webm;codecs=vp9,opus', ext: 'webm' },
-    { mime: 'video/webm;codecs=vp8,opus', ext: 'webm' },
+    { mime: 'video/webm;codecs=vp9', ext: 'webm' },
+    { mime: 'video/webm;codecs=vp8', ext: 'webm' },
     { mime: 'video/webm', ext: 'webm' },
   ];
 
@@ -28,18 +28,41 @@ export function getSupportedVideoMimeType() {
 }
 
 /**
- * Creates an animated video file from the 4 photos using HTML5 Canvas & MediaRecorder
- * Produces an MP4 (or WebM fallback) video perfect for Instagram Stories / TikTok / camera roll.
+ * Creates an animated video file from captured photos using HTML5 Canvas & MediaRecorder.
+ * Uses exact time-based frame scheduling (via performance.now()) so the output duration
+ * does NOT depend on the monitor refresh rate (60Hz, 120Hz, 144Hz).
  */
 export async function createExportVideo({
   photos = [],
   filterId = 'normal',
+  filterIntensity = 100,
+  adjustments = {},
   width = 720,
   height = 960,
-  durationSec = 4, // 4-second looping video sequence
+  durationSec = 4, // Exact duration in seconds
+  fps = 30,
   onProgress = () => {},
 }) {
   return new Promise(async (resolve, reject) => {
+    let stream = null;
+    let recorder = null;
+    let animId = null;
+
+    const cleanup = () => {
+      if (animId) {
+        cancelAnimationFrame(animId);
+        animId = null;
+      }
+      if (stream) {
+        try {
+          stream.getTracks().forEach(track => {
+            try { track.stop(); } catch (e) {}
+          });
+        } catch (e) {}
+        stream = null;
+      }
+    };
+
     try {
       if (!photos || photos.length === 0) {
         throw new Error('No photos provided for video generation.');
@@ -84,14 +107,14 @@ export async function createExportVideo({
       const canvas = document.createElement('canvas');
       canvas.width = width;
       canvas.height = height;
-      const ctx = canvas.getContext('2d');
+      const ctx = canvas.getContext('2d', { willReadFrequently: true });
       if (!ctx) {
         throw new Error('Could not create canvas 2D context.');
       }
 
-      const stream = canvas.captureStream(30); // 30 FPS stream
+      stream = canvas.captureStream(fps);
       const options = mimeType ? { mimeType } : undefined;
-      const recorder = new MediaRecorder(stream, options);
+      recorder = new MediaRecorder(stream, options);
 
       const chunks = [];
       recorder.ondataavailable = (e) => {
@@ -102,50 +125,60 @@ export async function createExportVideo({
 
       recorder.onerror = (err) => {
         console.error('MediaRecorder error:', err);
+        cleanup();
         reject(err);
       };
 
       recorder.onstop = () => {
         try {
-          const finalMime = recorder.mimeType || mimeType || 'video/mp4';
+          const finalMime = recorder?.mimeType || mimeType || 'video/mp4';
           const blob = new Blob(chunks, { type: finalMime });
           const url = URL.createObjectURL(blob);
           onProgress(100);
-          resolve({ blob, url, ext: extension, mimeType: finalMime });
+          cleanup();
+          resolve({ blob, url, ext: extension, mimeType: finalMime, durationSec });
         } catch (stopErr) {
+          cleanup();
           reject(stopErr);
         }
       };
 
       recorder.start();
 
-      const filter = getFilterById(filterId);
-      const totalFrames = 30 * durationSec; // 30 fps * 4s = 120 frames
-      let currentFrame = 0;
+      const cssFilterString = buildComposedFilterString(filterId, filterIntensity, adjustments);
+      const tintColor = getInterpolatedTintColor(filterId, filterIntensity);
 
-      const renderLoop = () => {
+      const targetDurationMs = durationSec * 1000;
+      const startTime = performance.now();
+
+      const render = (now) => {
         try {
-          if (currentFrame >= totalFrames) {
-            recorder.stop();
+          const elapsed = now - startTime;
+
+          if (elapsed >= targetDurationMs) {
+            onProgress(100);
+            if (recorder && recorder.state !== 'inactive') {
+              recorder.stop();
+            }
             return;
           }
 
-          const progressPercent = Math.round((currentFrame / totalFrames) * 95);
+          const progressPercent = Math.min(98, Math.round((elapsed / targetDurationMs) * 100));
           onProgress(progressPercent);
 
-          // Cycle through the photos
-          // Each photo gets displayed for ~0.8s
-          const photoIndex = Math.floor((currentFrame / (totalFrames / validImages.length))) % validImages.length;
+          // Cycle through the photos based on elapsed time (independent of monitor refresh rate)
+          const timePerPhoto = targetDurationMs / validImages.length;
+          const photoIndex = Math.min(validImages.length - 1, Math.floor(elapsed / timePerPhoto));
           const currentImg = validImages[photoIndex];
 
           // Draw background
           ctx.fillStyle = '#0a0b0e';
           ctx.fillRect(0, 0, width, height);
 
-          // Draw photo with filter
+          // Draw photo with composed filter
           ctx.save();
-          if (filter && filter.cssFilter && filter.cssFilter !== 'none') {
-            ctx.filter = filter.cssFilter;
+          if (cssFilterString && cssFilterString !== 'none') {
+            ctx.filter = cssFilterString;
           }
 
           const imgW = currentImg.width || 1;
@@ -166,13 +199,13 @@ export async function createExportVideo({
           ctx.restore();
 
           // Subtle filter tint
-          if (filter && filter.tintColor) {
-            ctx.fillStyle = filter.tintColor;
+          if (tintColor) {
+            ctx.fillStyle = tintColor;
             ctx.fillRect(0, 0, width, height);
           }
 
           // Video aesthetic overlays: Vintage frame stamp & timer
-          ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
+          ctx.fillStyle = 'rgba(0, 0, 0, 0.55)';
           ctx.beginPath();
           if (typeof ctx.roundRect === 'function') {
             ctx.roundRect(width - 120, height - 50, 100, 32, 8);
@@ -182,13 +215,13 @@ export async function createExportVideo({
           ctx.fill();
 
           ctx.fillStyle = '#ffffff';
-          ctx.font = '700 14px system-ui, sans-serif';
+          ctx.font = '700 13px system-ui, sans-serif';
           ctx.textAlign = 'center';
           ctx.textBaseline = 'middle';
           ctx.fillText(`0${photoIndex + 1} / 0${validImages.length}`, width - 70, height - 34);
 
-          // Cute Retro Recording Red Dot
-          const isBlink = Math.floor(currentFrame / 15) % 2 === 0;
+          // Blinking REC badge
+          const isBlink = Math.floor(elapsed / 500) % 2 === 0;
           if (isBlink) {
             ctx.fillStyle = '#ef4444';
             ctx.beginPath();
@@ -198,20 +231,23 @@ export async function createExportVideo({
           ctx.fillStyle = '#ffffff';
           ctx.font = '700 13px system-ui, sans-serif';
           ctx.textAlign = 'left';
-          ctx.fillText('REC', 52, 37);
+          ctx.fillText(`REC ${(elapsed / 1000).toFixed(1)}s`, 52, 37);
 
-          currentFrame++;
-          requestAnimationFrame(renderLoop);
+          animId = requestAnimationFrame(render);
         } catch (frameErr) {
           console.error('Video frame error:', frameErr);
-          try { recorder.stop(); } catch (e) {}
+          cleanup();
+          try {
+            if (recorder && recorder.state !== 'inactive') recorder.stop();
+          } catch (e) {}
           reject(frameErr);
         }
       };
 
-      requestAnimationFrame(renderLoop);
+      animId = requestAnimationFrame(render);
     } catch (err) {
       console.error('createExportVideo fatal error:', err);
+      cleanup();
       reject(err);
     }
   });

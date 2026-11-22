@@ -1,17 +1,29 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { renderPhotoStrip } from '../utils/canvasCompositor';
-import { RotateCcw, Sparkles, Eye } from 'lucide-react';
+import { RotateCcw, Sparkles, SlidersHorizontal, Download } from 'lucide-react';
 
 export default function PhotoStripCanvas({
   template,
   photos = [],
   filterId = 'normal',
+  filterIntensity = 100,
+  adjustments = {},
+  photoTransforms = {},
   paperColor = '#ffffff',
+  paperPattern = 'none',
+  borders = { width: 0, color: '#ffffff', radius: 14 },
+  stickers = [],
+  texts = [],
   onResetPhotos,
+  onOpenEditor,
   onOpenExport,
 }) {
   const canvasRef = useRef(null);
   const [isRendering, setIsRendering] = useState(false);
+
+  const slotCount = template?.slotCount || 4;
+  const exportW = template?.exportWidth || 1200;
+  const exportH = template?.exportHeight || 3600;
 
   useEffect(() => {
     let isCancelled = false;
@@ -25,7 +37,14 @@ export default function PhotoStripCanvas({
           template,
           photos,
           filterId,
+          filterIntensity,
+          adjustments,
+          photoTransforms,
           paperColor,
+          paperPattern,
+          borders,
+          stickers,
+          texts,
           dateStamp: true,
         });
       } catch (err) {
@@ -40,13 +59,13 @@ export default function PhotoStripCanvas({
     return () => {
       isCancelled = true;
     };
-  }, [template, photos, filterId, paperColor]);
+  }, [template, photos, filterId, filterIntensity, adjustments, photoTransforms, paperColor, paperPattern, borders, stickers, texts]);
 
   const hasPhotos = Array.isArray(photos) && photos.length > 0;
-  const isComplete = Array.isArray(photos) && photos.length >= 4;
+  const isComplete = Array.isArray(photos) && photos.length >= slotCount;
 
   return (
-    <div className="relative w-full h-full flex flex-col items-center justify-between p-3 bg-studio-900/90 backdrop-blur-md rounded-3xl border border-studio-700/60 shadow-xl overflow-hidden">
+    <div className="relative w-full h-full flex flex-col items-center justify-between p-3 bg-studio-900/90 backdrop-blur-md rounded-3xl border border-studio-700/60 shadow-xl overflow-hidden select-none">
       
       {/* Header Bar */}
       <div className="w-full flex items-center justify-between pb-2 border-b border-white/5">
@@ -55,7 +74,7 @@ export default function PhotoStripCanvas({
             Strip Preview
           </span>
           <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-white/10 text-slate-300 font-mono">
-            {photos.length}/4
+            {photos.length}/{slotCount}
           </span>
         </div>
 
@@ -92,7 +111,7 @@ export default function PhotoStripCanvas({
               <div className="w-10 h-10 rounded-full bg-white/10 flex items-center justify-center text-white/60 mb-2">
                 <Sparkles className="w-5 h-5 text-accent-pink animate-pulse" />
               </div>
-              <p className="text-xs font-bold text-white/90">Your 4-Cut Strip</p>
+              <p className="text-xs font-bold text-white/90">Your {slotCount}-Cut Strip</p>
               <p className="text-[10px] text-white/50 mt-1">Photos will appear here live as you capture them!</p>
             </div>
           )}
@@ -100,31 +119,37 @@ export default function PhotoStripCanvas({
       </div>
 
       {/* Footer Action Bar */}
-      <div className="w-full pt-2 border-t border-white/5 flex items-center justify-between gap-2">
+      <div className="w-full pt-2 border-t border-white/5 grid grid-cols-2 gap-2">
+        <button
+          onClick={() => {
+            try { if (onOpenEditor) onOpenEditor(); } catch (e) {}
+          }}
+          disabled={!hasPhotos}
+          className={`py-2.5 px-3 rounded-2xl font-bold text-xs flex items-center justify-center gap-1.5 transition-all active:scale-95 ${
+            hasPhotos
+              ? 'bg-studio-800 hover:bg-studio-700 text-slate-200 border border-white/10'
+              : 'bg-white/5 text-slate-500 cursor-not-allowed'
+          }`}
+        >
+          <SlidersHorizontal className="w-3.5 h-3.5 text-accent-cyan" />
+          <span>Edit & Deco</span>
+        </button>
+
         <button
           onClick={() => {
             try { if (onOpenExport) onOpenExport(); } catch (e) {}
           }}
           disabled={!hasPhotos}
-          className={`w-full py-2.5 px-4 rounded-2xl font-bold text-xs flex items-center justify-center gap-2 transition-all shadow-lg active:scale-98 ${
+          className={`py-2.5 px-3 rounded-2xl font-bold text-xs flex items-center justify-center gap-1.5 transition-all shadow-lg active:scale-95 ${
             hasPhotos
               ? isComplete
-                ? 'bg-gradient-to-r from-rose-500 to-pink-500 hover:from-rose-600 hover:to-pink-600 text-white shadow-rose-500/25 animate-pulse-subtle'
-                : 'bg-studio-700 hover:bg-studio-600 text-white'
+                ? 'bg-gradient-to-r from-rose-500 to-pink-500 hover:from-rose-600 hover:to-pink-600 text-white shadow-rose-500/25'
+                : 'bg-rose-500/80 hover:bg-rose-500 text-white'
               : 'bg-white/5 text-slate-500 cursor-not-allowed'
           }`}
         >
-          {isComplete ? (
-            <>
-              <Sparkles className="w-4 h-4 text-accent-amber animate-spin" />
-              <span>Finish & Export Strip (1200x3600)</span>
-            </>
-          ) : (
-            <>
-              <Eye className="w-4 h-4" />
-              <span>{hasPhotos ? `View Progress (${photos.length}/4)` : 'Take 4 Photos'}</span>
-            </>
-          )}
+          <Download className="w-3.5 h-3.5" />
+          <span>Export ({exportW}x{exportH})</span>
         </button>
       </div>
 
